@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "greeting": {
+      "_comment": "Local stdio MCP server. No auth, no network, no env needed. Swap command/args for the docker form below if you prefer running it in a container: \"command\": \"docker\", \"args\": [\"run\", \"--rm\", \"-i\", \"ghcr.io/OWNER/greeting-plugin:latest\"].",
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/servers/greeting-server.js"]
+    }
+  }
+}
