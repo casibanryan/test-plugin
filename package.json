@@ -29,6 +29,7 @@
     "verify:upstream": "npm run verify:upstream -w @pivotly/hub",
     "dev:api": "node packages/hub/scripts/fake-platform-api.js --port=8790",
     "package:hub": "node scripts/package-hub.js",
-    "verify:all": "npm run contract:verify && npm run versions:verify && npm test && npm run axle:verify"
+    "verify:all": "npm run contract:verify && npm run versions:verify && npm test && npm run axle:verify",
+    "ci:local": "node scripts/ci-local.js"
   }
 }
