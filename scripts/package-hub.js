@@ -66,8 +66,14 @@ function copyRecursive(from, to) {
   fs.copyFileSync(from, to);
 }
 
-// A stable, content-addressed identity for the artifact: every file's path and sha256,
-// hashed in sorted order. Two builds of the same commit produce the same digest.
+// A content-addressed identity for the artifact: every file's path and sha256, hashed
+// in sorted order.
+//
+// Its job is same-run identity — proving the tree that was scanned and self-tested is
+// the tree that gets deployed. It is NOT a reproducible-build guarantee across
+// machines: a Windows checkout has CRLF where a Linux one has LF, so the same commit
+// legitimately digests differently on a dev box and on a CI runner. Comparing digests
+// across environments would be reading it for something it does not claim.
 function digestTree(root) {
   const files = [];
   const walk = (dir) => {
@@ -99,7 +105,9 @@ function digestTree(root) {
   return {
     digest: hash.digest('hex').slice(0, 16),
     fileCount: entries.length,
-    symlinks: entries.filter((e) => e.link).map((e) => e.rel),
+    // Reported as "path -> target": knowing where a stray link pointed is what tells
+    // you which install step produced it.
+    symlinks: entries.filter((e) => e.link).map((e) => `${e.rel} -> ${e.link}`),
   };
 }
 
@@ -122,40 +130,66 @@ function main() {
 
   // Production dependencies only, resolved from the committed lockfile. `npm ci` rather
   // than `npm install` so the artifact's dependency tree is the reviewed one.
-  execFileSync('npm', ['ci', '--omit=dev', '--workspace', '@pivotly/hub', '--include-workspace-root'], {
+  //
+  // --no-bin-links is what stops npm creating node_modules/.bin/* CLI shims. On Linux
+  // those are symlinks; on Windows they are .cmd files, which is why their absence is
+  // invisible on a Windows dev machine and shows up on a CI runner. The artifact never
+  // invokes a bin shim — startup.sh runs `node packages/hub/src/index.js` directly, and
+  // the packaged scripts are run the same way — so there is nothing to lose by not
+  // creating them, and one whole class of symlink stops existing.
+  //
+  // Scoped to this install deliberately, rather than put in a repo .npmrc: the dev
+  // install DOES want .bin (npx, local tooling), and a repo-wide setting would break
+  // that to fix a packaging concern.
+  execFileSync('npm', ['ci', '--omit=dev', '--no-bin-links', '--workspace', '@pivotly/hub', '--include-workspace-root'], {
     cwd: outDir,
     stdio: 'inherit',
     shell: process.platform === 'win32',
   });
 
-  // npm links every workspace package into node_modules as a SYMLINK. Those resolve
-  // fine on this machine, but the artifact is zipped and unpacked on App Service, and
-  // symlink handling through a zip is not something to rely on — a broken link there
-  // surfaces as MODULE_NOT_FOUND at startup, on the deployed instance, with no local
-  // reproduction. So every link is turned into a real directory before packaging, and
-  // the result is asserted to contain none.
-  const scopeDir = path.join(outDir, 'node_modules', '@pivotly');
-  if (fs.existsSync(scopeDir)) {
-    for (const entry of fs.readdirSync(scopeDir, { withFileTypes: true })) {
-      const full = path.join(scopeDir, entry.name);
-      if (!entry.isSymbolicLink()) continue;
+  // npm still links every workspace PACKAGE into node_modules as a symlink; that is
+  // unaffected by --no-bin-links. Those resolve fine here, but the artifact is zipped
+  // and unpacked on App Service, and symlink handling through a zip is not something to
+  // rely on — a broken link surfaces as MODULE_NOT_FOUND at startup, on the deployed
+  // instance, with no local reproduction.
+  //
+  // So this walks the whole artifact rather than just node_modules/@pivotly. The
+  // narrower version of this loop passed on Windows and failed on Linux, because it
+  // only knew about the symlinks it had been told to expect. Anything link-shaped is
+  // resolved here, whatever produced it.
+  let dereferenced = 0;
+  let removed = 0;
 
-      let target;
-      try {
-        target = fs.realpathSync(full);
-      } catch {
-        // Already dangling here, which would have been a startup failure there.
-        fs.rmSync(full, { force: true });
-        console.log(`ok    removed the dangling workspace link @pivotly/${entry.name}`);
+  const resolveLinks = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+
+      if (entry.isSymbolicLink()) {
+        let target;
+        try {
+          target = fs.realpathSync(full);
+        } catch {
+          // Dangling already; it would have been a startup failure there.
+          fs.rmSync(full, { force: true });
+          removed += 1;
+          continue;
+        }
+        fs.rmSync(full, { recursive: true, force: true });
+        copyRecursive(target, full);
+        dereferenced += 1;
         continue;
       }
-      fs.rmSync(full, { recursive: true, force: true });
-      copyRecursive(target, full);
-      console.log(`ok    dereferenced the @pivotly/${entry.name} workspace link into a real directory`);
+
+      if (entry.isDirectory()) resolveLinks(full);
     }
+  };
+
+  resolveLinks(outDir);
+  if (dereferenced || removed) {
+    console.log(`ok    resolved ${dereferenced} symlink(s) into real files${removed ? `, removed ${removed} dangling` : ''}`);
   }
 
-  const contractEntry = path.join(scopeDir, 'contract', 'package.json');
+  const contractEntry = path.join(outDir, 'node_modules', '@pivotly', 'contract', 'package.json');
   if (!fs.existsSync(contractEntry)) {
     throw new Error('the artifact has no usable @pivotly/contract — it would fail at startup with MODULE_NOT_FOUND');
   }
