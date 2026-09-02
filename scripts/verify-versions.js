@@ -81,16 +81,27 @@ for (const client of CLIENTS) {
   }
 }
 
-// --- channel pins ---------------------------------------------------------
-// A channel pinned to a contract this repository does not build means the clients were
-// not regenerated after a core change — the cascade the digest exists to catch. The
-// generator reports this per channel; here it is checked for ALL of them at once, which
-// is what makes a partial resync visible.
+// --- channels -------------------------------------------------------------
+// NOT checked here: whether a channel's lastVerified matches what this repo builds.
+// Those are different facts. `lastVerified` records what that channel was last PROVEN
+// to serve; production legitimately lags the working tree while the next version is in
+// development. Requiring equality would deadlock every contract change behind a deploy.
+//
+// What IS checked is that the record is well formed, because a malformed one is worse
+// than an absent one — it looks like evidence and is not.
 for (const name of CHANNELS) {
   const channel = (channels.channels || {})[name];
   if (!ok(`channels.json declares "${name}"`, Boolean(channel))) continue;
-  same(`channel "${name}" pins the contract version this repo builds`, channel.contractVersion, CONTRACT_VERSION);
-  same(`channel "${name}" pins the contract digest this repo builds`, channel.contractDigest, contractDigest());
+  ok(`channel "${name}" has a url`, Boolean(channel.url), JSON.stringify(channel));
+
+  const lv = channel.lastVerified;
+  if (lv == null) {
+    console.log(`ok    channel "${name}" has never been deployed (lastVerified is null)`);
+    continue;
+  }
+  ok(`channel "${name}" lastVerified has a 12-hex digest`, /^[0-9a-f]{12}$/.test(lv.contractDigest || ''), lv.contractDigest);
+  ok(`channel "${name}" lastVerified has a semver contract version`, /^\d+\.\d+\.\d+$/.test(lv.contractVersion || ''), lv.contractVersion);
+  ok(`channel "${name}" lastVerified records when it was verified`, Boolean(lv.at), JSON.stringify(lv));
 }
 
 // --- release tag ----------------------------------------------------------

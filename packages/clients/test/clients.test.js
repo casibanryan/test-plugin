@@ -43,15 +43,18 @@ test('every declared client has its config committed, exactly as generated', () 
   }
 });
 
-test('every channel is pinned to the contract this repo builds', () => {
-  // All four, not just the default: a partial resync is otherwise invisible until that
-  // channel is deployed.
+test('a channel is allowed to lag this checkout — that is the normal state', () => {
+  // lastVerified RECORDS what a channel was last proven to serve. It is deliberately
+  // NOT required to equal what this checkout builds: while the next version is in
+  // development, production is still serving the previous one. An earlier version of
+  // this repo asserted equality here, which deadlocked every contract change behind a
+  // deploy that could not happen yet.
   for (const [name, channel] of Object.entries(manifest.channels)) {
-    const verdict = compareContract(
-      { contractVersion: channel.contractVersion, contractDigest: channel.contractDigest },
-      { contractVersion: CONTRACT_VERSION, contractDigest: contractDigest() }
-    );
-    assert.equal(verdict.verdict, 'ok', `${name}: ${verdict.reason}`);
+    if (channel.lastVerified == null) continue; // never deployed — nothing to check
+    const lv = channel.lastVerified;
+    assert.match(lv.contractDigest, /^[0-9a-f]{12}$/, `${name} has a malformed verification record`);
+    assert.match(lv.contractVersion, /^\d+\.\d+\.\d+$/, `${name} has a malformed contract version`);
+    assert.ok(lv.at, `${name} records no verification timestamp`);
   }
 });
 
@@ -86,15 +89,17 @@ test('every channel url is distinct and targets the contract MCP path', () => {
 // Writers
 // ---------------------------------------------------------------------------
 test('headersFor sends caller identity and no credential', () => {
-  const headers = headersFor({ id: 'axle' }, { name: 'dev', contractVersion: '1.2.3' });
+  const headers = headersFor({ id: 'axle' }, { name: 'dev' });
   assert.equal(headers[HEADERS.client], 'axle');
   assert.equal(headers[HEADERS.channel], 'dev');
-  assert.equal(headers[HEADERS.clientContract], '1.2.3');
+  // The contract the client was GENERATED from — always this build, never a value read
+  // back out of the channel record.
+  assert.equal(headers[HEADERS.clientContract], CONTRACT_VERSION);
   assert.equal(Object.keys(headers).some((k) => /authorization/i.test(k)), false);
 });
 
 test('the mcp-json writer declares an http server at the channel url', () => {
-  const config = JSON.parse(writeMcpJson({ id: 'axle' }, { name: 'dev', url: 'https://x.test/mcp', contractVersion: '1.2.3' }));
+  const config = JSON.parse(writeMcpJson({ id: 'axle' }, { name: 'dev', url: 'https://x.test/mcp' }));
   const server = config.mcpServers['pivotly-hub'];
   assert.equal(server.type, 'http');
   assert.equal(server.url, 'https://x.test/mcp');
@@ -102,7 +107,7 @@ test('the mcp-json writer declares an http server at the channel url', () => {
 });
 
 test('the toml writer emits a parseable server block', () => {
-  const toml = writeToml({ id: 'codex' }, { name: 'dev', url: 'https://x.test/mcp', contractVersion: '1.2.3' });
+  const toml = writeToml({ id: 'codex' }, { name: 'dev', url: 'https://x.test/mcp' });
   assert.match(toml, /^# GENERATED/);
   assert.match(toml, /\[mcp_servers\.pivotly_hub\]/);
   assert.match(toml, /url = "https:\/\/x\.test\/mcp"/);
@@ -113,10 +118,7 @@ test('the toml writer emits a parseable server block', () => {
 test('the toml writer refuses a value it cannot safely quote', () => {
   // Better to fail loudly than to emit a malformed config that the host silently
   // ignores or half-parses.
-  assert.throws(
-    () => writeToml({ id: 'codex' }, { name: 'dev', url: 'https://x.test/"quoted"/mcp', contractVersion: '1' }),
-    /needs TOML escaping/
-  );
+  assert.throws(() => writeToml({ id: 'codex' }, { name: 'dev', url: 'https://x.test/"quoted"/mcp' }), /needs TOML escaping/);
 });
 
 test('renderAll covers every declared client, and can target one', () => {
@@ -212,16 +214,37 @@ test('--check fails on drift in ANY client, and does not repair it', async () =>
   assert.match(fs.readFileSync(target, 'utf8'), /# hand-edited/);
 });
 
-test('--check fails when a channel pin no longer matches this checkout', async () => {
+test('--check does NOT fail when a channel was last verified on an older contract', async () => {
+  // The regression guard for the deadlock: an out-of-date verification record is
+  // information, not an error. Production lags while the next version is built, and
+  // failing on that would make every contract change unshippable.
   const dir = scratchCopy();
   const manifestPath = path.join(dir, 'channels.json');
   const scratch = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  scratch.channels.production.contractDigest = 'ffffffffffff';
+  scratch.channels.production.lastVerified = {
+    contractVersion: '0.1.0',
+    contractDigest: 'ffffffffffff',
+    commit: 'oldsha',
+    at: '2020-01-01T00:00:00.000Z',
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(scratch, null, 2));
+
+  const res = await run(dir, ['--check', '--channel=production', '--timeout-ms=300']);
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /normal until it is deployed/);
+});
+
+test('--check fails on a malformed verification record', async () => {
+  // A record that looks like evidence and is not is worse than no record at all.
+  const dir = scratchCopy();
+  const manifestPath = path.join(dir, 'channels.json');
+  const scratch = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  scratch.channels.production.lastVerified = { contractVersion: 'not-semver', contractDigest: 'nope' };
   fs.writeFileSync(manifestPath, JSON.stringify(scratch, null, 2));
 
   const res = await run(dir, ['--check', '--channel=production', '--timeout-ms=300']);
   assert.equal(res.code, 1);
-  assert.match(res.stderr, /tool surface changed without regenerating the clients/);
+  assert.match(res.stderr, /malformed lastVerified/);
 });
 
 test('--check tolerates an unreachable channel rather than failing CI on network access', async () => {
@@ -261,7 +284,7 @@ function pointLocalAt(dir, port) {
   return scratch;
 }
 
-test('--check passes when the deployed digest matches the pin', async () => {
+test('--check passes when the deployed hub serves this checkout', async () => {
   const hub = fakeHub({ contractVersion: CONTRACT_VERSION, contractDigest: contractDigest(), commit: 'abc123', channel: 'local' });
   const port = await hub.listen();
   try {
@@ -271,7 +294,7 @@ test('--check passes when the deployed digest matches the pin', async () => {
 
     const res = await run(dir, ['--check', '--channel=local']);
     assert.equal(res.code, 0, res.stderr);
-    assert.match(res.stdout, /serves the pinned contract/);
+    assert.match(res.stdout, /serves this checkout's contract/);
     assert.match(res.stdout, /deployed commit abc123/);
   } finally {
     await hub.close();
@@ -288,7 +311,7 @@ test('--check fails when the deployed hub serves a different contract', async ()
 
     const res = await run(dir, ['--check', '--channel=local']);
     assert.equal(res.code, 1);
-    assert.match(res.stderr, /does not match the deployed hub/);
+    assert.match(res.stderr, /but this checkout builds/);
   } finally {
     await hub.close();
   }
@@ -307,33 +330,47 @@ test('a differing contract MAJOR is reported as breaking, not as resyncable drif
     const res = await run(dir, ['--check', '--channel=local']);
     assert.equal(res.code, 1);
     assert.match(res.stderr, /BREAKING/);
-    assert.match(res.stderr, /must be upgraded/);
+    assert.match(res.stderr, /cannot talk to that hub/);
   } finally {
     await hub.close();
   }
 });
 
-test('--sync-pin advances the pin and regenerates EVERY client together', async () => {
+test('--sync-pin records what the channel is now verified to serve', async () => {
   const hub = fakeHub({ contractVersion: CONTRACT_VERSION, contractDigest: contractDigest(), commit: 'deadbeef', channel: 'local' });
   const port = await hub.listen();
   try {
     const dir = scratchCopy();
     const manifestPath = path.join(dir, 'channels.json');
-    const scratch = pointLocalAt(dir, port);
-    scratch.channels.local.contractDigest = 'cccccccccccc'; // a stale pin
-    fs.writeFileSync(manifestPath, JSON.stringify(scratch, null, 2));
+    pointLocalAt(dir, port);
 
     const res = await run(dir, ['--sync-pin', '--channel=local']);
     assert.equal(res.code, 0, res.stderr);
 
-    const after = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    assert.equal(after.channels.local.contractDigest, contractDigest());
-    assert.match(res.stdout, /pin advanced/);
+    const after = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).channels.local.lastVerified;
+    assert.equal(after.contractDigest, contractDigest());
+    assert.equal(after.contractVersion, CONTRACT_VERSION);
+    assert.equal(after.commit, 'deadbeef', 'the record must name the commit that was verified');
+    assert.ok(after.at, 'the record must say when');
+    assert.match(res.stdout, /now verified at contract/);
+  } finally {
+    await hub.close();
+  }
+});
 
-    // The pin and the configs must move together, or a client would still be pointing
-    // at the previous channel while the manifest claims otherwise.
-    for (const client of CLIENTS) {
-      assert.ok(readConfig(dir, client.id).includes(`127.0.0.1:${port}`), `${client.id} was not regenerated with the pin`);
+test('--sync-pin only touches the channel it was asked about', async () => {
+  const hub = fakeHub({ contractVersion: CONTRACT_VERSION, contractDigest: contractDigest(), commit: 'deadbeef', channel: 'local' });
+  const port = await hub.listen();
+  try {
+    const dir = scratchCopy();
+    const manifestPath = path.join(dir, 'channels.json');
+    pointLocalAt(dir, port);
+
+    await run(dir, ['--sync-pin', '--channel=local']);
+    const after = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).channels;
+    assert.ok(after.local.lastVerified, 'local should have been recorded');
+    for (const other of ['dev', 'prerelease', 'production']) {
+      assert.equal(after[other].lastVerified, null, `${other} must not be touched by a local deploy`);
     }
   } finally {
     await hub.close();

@@ -72,13 +72,17 @@ if (manifest) {
     ok(`${name} has a url`, Boolean(channel.url));
     ok(`${name} has a description`, (channel.description || '').length > 10);
     ok(`${name} url targets the contract MCP path`, String(channel.url || '').endsWith(ENDPOINTS.mcp), channel.url);
-    ok(`${name} pins a 12-hex contract digest`, /^[0-9a-f]{12}$/.test(channel.contractDigest || ''), channel.contractDigest);
-    ok(`${name} pins a semver contract version`, /^\d+\.\d+\.\d+$/.test(channel.contractVersion || ''), channel.contractVersion);
-
-    // The pin must describe what this repo builds, for EVERY channel — not just the
-    // default. A partial resync is otherwise invisible until that channel is deployed.
-    equal(`${name} pins the contract version this repo builds`, channel.contractVersion, CONTRACT_VERSION);
-    equal(`${name} pins the contract digest this repo builds`, channel.contractDigest, contractDigest());
+    // lastVerified is a RECORD of what this channel was last proven to serve, not a
+    // requirement. It is null until that channel has been deployed, and it is allowed
+    // to lag this checkout — that is the normal state while a version is in progress.
+    if (channel.lastVerified == null) {
+      ok(`${name} has no stale verification record`, true);
+    } else {
+      const lv = channel.lastVerified;
+      ok(`${name} lastVerified has a 12-hex digest`, /^[0-9a-f]{12}$/.test(lv.contractDigest || ''), lv.contractDigest);
+      ok(`${name} lastVerified has a semver contract version`, /^\d+\.\d+\.\d+$/.test(lv.contractVersion || ''), lv.contractVersion);
+      ok(`${name} lastVerified records a timestamp`, Boolean(lv.at), JSON.stringify(lv));
+    }
 
     if (HARDENED_CHANNELS.includes(name)) {
       ok(`${name} is https, being a hardened channel`, String(channel.url || '').startsWith('https://'), channel.url);

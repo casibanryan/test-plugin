@@ -1,34 +1,30 @@
 {
-  "_comment": "Deployment channels every client can point at, and the contract each one is pinned to. THIS FILE IS THE CLIENTS HALF OF THE CASCADE GUARD: contractDigest is the tool surface the clients were generated against. scripts/generate.js compares it to the digest the deployed hub reports at /version, so a core change that has not reached the client configs fails a check instead of failing a tool call in someone editor. CD advances a channel pin only after that channel deploy has been smoke-tested. Shared by all clients: the pin describes the DEPLOYMENT, which is client-independent.",
+  "_comment": "Deployment channels every client can point at. Each channel records TWO different things, and keeping them apart is the whole point: url is where that channel lives, and lastVerified is what that channel was last PROVEN to be serving (written by CD after a deploy passes its checks, null until then). lastVerified is a RECORD, never a requirement: production legitimately lags behind your working tree while you develop the next version. What this checkout builds lives in packages/contract/contract.lock.json, in exactly one place.",
   "default": "production",
   "channels": {
     "local": {
       "description": "A hub on your own machine (npm run dev:hub). Plaintext is allowed here and nowhere else.",
       "url": "http://127.0.0.1:8787/mcp",
       "requireHttps": false,
-      "contractVersion": "0.3.0",
-      "contractDigest": "bf49ea197bc2"
+      "lastVerified": null
     },
     "dev": {
-      "description": "Redeployed on every push to main, no gate. There is always something live and newer than the last release to point a client at.",
+      "description": "Redeployed on every push to main, no gate. There is always something live and newer than the last release.",
       "url": "https://pivotly-hub-dev.azurewebsites.net/mcp",
       "requireHttps": true,
-      "contractVersion": "0.3.0",
-      "contractDigest": "bf49ea197bc2"
+      "lastVerified": null
     },
     "prerelease": {
       "description": "The App Service staging slot, deployed on a version tag and fully verified. What production is about to become.",
       "url": "https://pivotly-hub-prerelease.azurewebsites.net/mcp",
       "requireHttps": true,
-      "contractVersion": "0.3.0",
-      "contractDigest": "bf49ea197bc2"
+      "lastVerified": null
     },
     "production": {
-      "description": "The production slot. Its pin is only ever advanced by CD, after a slot swap has passed its post-swap smoke test.",
+      "description": "The production slot. Reached by a slot swap from prerelease, after an approval.",
       "url": "https://pivotly-hub.azurewebsites.net/mcp",
       "requireHttps": true,
-      "contractVersion": "0.3.0",
-      "contractDigest": "bf49ea197bc2"
+      "lastVerified": null
     }
   }
 }

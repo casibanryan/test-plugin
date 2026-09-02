@@ -45,12 +45,15 @@ async function run({ hubUrl, channel, check, timeoutMs }) {
   const repo = { contractVersion: CONTRACT_VERSION, contractDigest: contractDigest() };
 
   // --- the clients' half ---------------------------------------------------
+  // The clients are generated from THIS checkout, so what they were built against is
+  // the repo's contract. `lastVerified` is a separate record of what the channel was
+  // last proven to serve, and is compared as drift rather than asserted.
   const manifest = JSON.parse(fs.readFileSync(path.join(CLIENTS_ROOT, 'channels.json'), 'utf8'));
   const channelName = channel || manifest.default;
-  const pinned = (manifest.channels || {})[channelName];
-  if (!check(`the channel manifest declares "${channelName}"`, Boolean(pinned))) return;
+  const declared = (manifest.channels || {})[channelName];
+  if (!check(`the channel manifest declares "${channelName}"`, Boolean(declared))) return;
 
-  const clientSide = { contractVersion: pinned.contractVersion, contractDigest: pinned.contractDigest };
+  const clientSide = repo;
 
   // --- the deployed hub's half ---------------------------------------------
   const versionUrl = `${hubUrl.replace(/\/+$/, '')}${ENDPOINTS.version}`;
@@ -72,37 +75,39 @@ async function run({ hubUrl, channel, check, timeoutMs }) {
     `${repoVsHub.reason}. The deployed build is from a different contract than this checkout — either the deploy has not finished, or it was built from another commit.`
   );
 
+  // Called out separately: a differing major is not resyncable drift, it means clients
+  // generated here cannot talk to that hub at all.
   const clientVsHub = compareContract(clientSide, hub);
-  check(
-    `the "${channelName}" channel pin matches the deployed hub`,
-    clientVsHub.verdict === 'ok',
-    `${clientVsHub.reason}. THIS IS THE CASCADE: the hub moved and the client configs did not follow. Run: npm run clients:sync-pin -- --channel=${channelName}`
-  );
-
-  const clientVsRepo = compareContract(clientSide, repo);
-  check(
-    `the "${channelName}" channel pin matches this repository`,
-    clientVsRepo.verdict === 'ok',
-    `${clientVsRepo.reason}. The tool surface changed in this checkout without regenerating the clients.`
-  );
-
-  // Called out separately: a differing major is not a resyncable drift, it means the
-  // shipped clients cannot talk to that hub at all.
   check(
     'the deployed hub is not a breaking contract major for these clients',
     clientVsHub.verdict !== 'breaking',
-    `${clientVsHub.reason} — clients on "${channelName}" are broken until upgraded, not merely out of date`
+    `${clientVsHub.reason} — clients generated from this checkout are broken against "${channelName}", not merely out of date`
   );
+
+  // The verification record is context, not a gate. If it lags, that channel simply has
+  // not been deployed from this commit yet — which is the normal state mid-development.
+  if (declared.lastVerified) {
+    const recordVsHub = compareContract(
+      { contractVersion: declared.lastVerified.contractVersion, contractDigest: declared.lastVerified.contractDigest },
+      hub
+    );
+    console.log(
+      recordVsHub.verdict === 'ok'
+        ? `      note: the recorded verification for "${channelName}" matches what it is serving`
+        : `      note: "${channelName}" was last verified at ${declared.lastVerified.contractDigest} but now serves ${hub.contractDigest} — run clients:sync-pin after verifying`
+    );
+  } else {
+    console.log(`      note: "${channelName}" has no verification record yet (lastVerified is null)`);
+  }
 
   // --- every client's committed config -------------------------------------
   // The committed configs are generated for ONE channel — the manifest's default. So
-  // "the config matches this channel" is only a meaningful assertion when this IS the
-  // default channel; when walking the whole ladder (--all-channels) the other rungs are
-  // being checked for pin agreement, not for which channel the checked-in files target.
-  // Asserting otherwise would fail three channels out of four for no reason.
+  // "the config matches this channel" is only meaningful when this IS the default
+  // channel; when walking the whole ladder (--all-channels) the other rungs are being
+  // checked for contract agreement, not for which channel the checked-in files target.
   const isDefaultChannel = channelName === manifest.default;
 
-  for (const r of renderAll({ name: channelName, ...pinned })) {
+  for (const r of renderAll({ name: channelName, ...declared })) {
     const committed = fs.existsSync(r.file) ? fs.readFileSync(r.file, 'utf8') : null;
     if (!check(`${r.relative} is committed`, Boolean(committed), 'run: npm run clients:generate')) continue;
 
@@ -180,7 +185,7 @@ async function run({ hubUrl, channel, check, timeoutMs }) {
   }
 
   console.log(
-    `      repo ${repo.contractDigest} | hub ${hub.contractDigest} | clients(${channelName}) ${clientSide.contractDigest} | ` +
+    `      repo ${repo.contractDigest} | hub ${hub.contractDigest} | ` +
       `commit ${hub.commit} | channel ${hub.channel} | ${CLIENTS.length} clients checked`
   );
 }

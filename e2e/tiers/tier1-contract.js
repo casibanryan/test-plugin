@@ -64,21 +64,23 @@ async function run({ check }) {
     check('the hub implements exactly the declared tool set', false, err.message);
   }
 
-  // Every channel must be pinned to what this checkout builds — all of them, not just
-  // the default, because a partial resync is otherwise invisible until that channel is
-  // deployed.
+  // Every contract channel must be declared with a url. What each one is SERVING is a
+  // separate fact, discovered from the live endpoint in tier 3 — not asserted here,
+  // because a channel legitimately lags this checkout until it has been deployed.
   const manifest = JSON.parse(fs.readFileSync(path.join(CLIENTS_ROOT, 'channels.json'), 'utf8'));
   check(`channels.json declares all ${CHANNELS.length} contract channels`, Object.keys(manifest.channels).length === CHANNELS.length);
 
   for (const channelName of CHANNELS) {
     const channel = manifest.channels[channelName];
     if (!check(`channel "${channelName}" is declared`, Boolean(channel))) continue;
-    check(
-      `channel "${channelName}" pins this checkout's contract`,
-      channel.contractDigest === contractDigest(),
-      `pinned ${channel.contractDigest}, built ${contractDigest()}`
-    );
-    check(`channel "${channelName}" pins this checkout's version`, channel.contractVersion === CONTRACT_VERSION, `pinned ${channel.contractVersion}, built ${CONTRACT_VERSION}`);
+    check(`channel "${channelName}" has a url`, Boolean(channel.url), JSON.stringify(channel));
+    if (channel.lastVerified != null) {
+      check(
+        `channel "${channelName}" has a well-formed verification record`,
+        /^[0-9a-f]{12}$/.test(channel.lastVerified.contractDigest || ''),
+        JSON.stringify(channel.lastVerified)
+      );
+    }
   }
 
   // Every declared client must render, and what renders must be what is committed.

@@ -7,8 +7,8 @@
 //   node scripts/generate.js --write --client=axle       just one
 //   node scripts/generate.js --check                     CI: fail on any drift (no writes)
 //   node scripts/generate.js --sync-pin --channel=production
-//                                                        CD: advance a channel's pin to
-//                                                        what the deployed hub reports
+//                                                        CD: record what that channel is
+//                                                        now verified to be serving
 //
 // This is the multi-client story in one file. `CLIENTS` in the contract declares which
 // clients exist and what format each one wants; a writer below turns the resolved
@@ -16,18 +16,22 @@
 // writer here — never a second copy of the channel list, and never a hand-maintained
 // config that can disagree with its siblings.
 //
-// The problem it solves: each client config is what its host reads to reach the hub,
-// and channels.json records which contract each channel was last known to serve. If
-// the core team ships a new tool surface and nothing updates those, the clients keep
-// working right up until they call a tool whose schema changed — and the failure
-// surfaces in a user's editor, far from the change that caused it.
+// TWO DIFFERENT FACTS, deliberately kept apart — conflating them is the mistake this
+// file is written to avoid:
 //
-//   CI   --check     configs must match the manifest exactly, and (when the channel is
-//                    reachable) the deployed digest must match the pin. Read-only, so a
-//                    pull request cannot pass by rewriting the thing being checked.
-//   CD   --sync-pin  after a channel's deploy passes its smoke test, advance that pin to
-//                    the digest the hub is actually serving. The pin therefore always
-//                    trails a *verified* deploy.
+//   what this checkout BUILDS      packages/contract/contract.lock.json. One value.
+//   what a channel SERVES          channels.json -> lastVerified. Per channel, written
+//                                  by CD after a deploy passes, null until then.
+//
+// They are allowed to differ, and normally do: while you develop the next version,
+// production is still serving the last one. So `lastVerified` is a RECORD, never a
+// requirement — nothing local ever asserts it equals the current build.
+//
+//   CI   --check     configs must match what the generator produces, and (when the
+//                    channel answers) the DEPLOYED digest must match this checkout.
+//                    Read-only, so a pull request cannot pass by rewriting the evidence.
+//   CD   --sync-pin  after a deploy passes its checks, record what that channel is now
+//                    verified to serve.
 //   dev  --write     regenerate after switching channels locally.
 
 'use strict';
@@ -70,7 +74,10 @@ function resolveChannel(manifest) {
 const headersFor = (client, channel) => ({
   [HEADERS.client]: client.id,
   [HEADERS.channel]: channel.name,
-  [HEADERS.clientContract]: channel.contractVersion,
+  // The contract this client was GENERATED from — always the current build, never a
+  // per-channel value. It is what lets the hub answer "which clients are still on the
+  // old contract" from its logs.
+  [HEADERS.clientContract]: CONTRACT_VERSION,
 });
 
 const GENERATED_NOTE = (client, channel) =>
@@ -180,8 +187,16 @@ async function main() {
   if (!channel.url.endsWith(ENDPOINTS.mcp)) {
     problems.push(`channel "${channel.name}" url should end with the contract's MCP path (${ENDPOINTS.mcp}): ${channel.url}`);
   }
-  if (!/^[0-9a-f]{12}$/.test(channel.contractDigest || '')) {
-    problems.push(`channel "${channel.name}" has a malformed contractDigest: ${channel.contractDigest}`);
+  // lastVerified is optional (null until that channel has been deployed), but if it is
+  // present it has to be well formed, or the record is worse than useless.
+  if (channel.lastVerified != null) {
+    const lv = channel.lastVerified;
+    if (!/^[0-9a-f]{12}$/.test(lv.contractDigest || '')) {
+      problems.push(`channel "${channel.name}" has a malformed lastVerified.contractDigest: ${lv.contractDigest}`);
+    }
+    if (!/^\d+\.\d+\.\d+$/.test(lv.contractVersion || '')) {
+      problems.push(`channel "${channel.name}" has a malformed lastVerified.contractVersion: ${lv.contractVersion}`);
+    }
   }
 
   const rendered = renderAll(channel, only);
@@ -193,7 +208,7 @@ async function main() {
         {
           channel: channel.name,
           url: channel.url,
-          pinnedContract: { version: channel.contractVersion, digest: channel.contractDigest },
+          lastVerified: channel.lastVerified,
           thisCheckout: { version: CONTRACT_VERSION, digest: contractDigest() },
           clients: rendered.map((r) => ({ id: r.client.id, host: r.client.host, config: r.relative, inSync: !drifted.includes(r) })),
         },
@@ -246,20 +261,22 @@ async function main() {
       return;
     }
 
-    const unchanged = channel.contractDigest === deployedDigest && channel.contractVersion === contractVersion;
-    manifest.channels[channel.name].contractDigest = deployedDigest;
-    manifest.channels[channel.name].contractVersion = contractVersion;
+    const previous = channel.lastVerified;
+    const record = {
+      contractVersion,
+      contractDigest: deployedDigest,
+      commit: deployed.identity.commit ?? null,
+      at: new Date().toISOString(),
+    };
+    const unchanged = previous && previous.contractDigest === record.contractDigest && previous.commit === record.commit;
+
+    manifest.channels[channel.name].lastVerified = record;
     fs.writeFileSync(CHANNELS_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
 
-    // Regenerate from the freshly pinned channel, so the configs and the pin move together.
-    for (const r of renderAll({ ...channel, contractVersion, contractDigest: deployedDigest })) {
-      fs.mkdirSync(path.dirname(r.file), { recursive: true });
-      fs.writeFileSync(r.file, r.content);
-    }
     console.log(
       unchanged
-        ? `ok    channel "${channel.name}" pin already at ${deployedDigest} (${contractVersion}) — nothing to commit`
-        : `ok    channel "${channel.name}" pin advanced to ${deployedDigest} (${contractVersion}); ${CLIENTS.length} client config(s) regenerated`
+        ? `ok    channel "${channel.name}" already recorded at ${record.contractDigest} (commit ${record.commit}) — nothing to commit`
+        : `ok    channel "${channel.name}" now verified at contract ${record.contractDigest} (${contractVersion}), commit ${record.commit}`
     );
     return;
   }
@@ -271,36 +288,42 @@ async function main() {
     problems.push(`${r.relative} has drifted from channels.json (channel "${channel.name}"). Run \`npm run clients:generate\` and commit.`);
   }
 
-  // The pin must describe the contract this repository builds. If it does not, someone
-  // changed the tool surface without regenerating the clients — the cascade this whole
-  // mechanism exists to catch.
-  const localVerdict = compareContract(
-    { contractVersion: channel.contractVersion, contractDigest: channel.contractDigest },
-    { contractVersion: CONTRACT_VERSION, contractDigest: contractDigest() }
-  );
-  if (localVerdict.verdict !== 'ok') {
-    problems.push(
-      `channel "${channel.name}" is pinned to contract ${channel.contractDigest} (${channel.contractVersion}) but this checkout builds ` +
-        `${contractDigest()} (${CONTRACT_VERSION}) — ${localVerdict.reason}. The tool surface changed without regenerating the clients.`
+  // NOT checked here: whether lastVerified equals what this checkout builds. Those are
+  // different facts (see the note at the top), and production legitimately lags while
+  // the next version is in development. Asserting equality would deadlock every
+  // contract change behind a deploy.
+  if (channel.lastVerified) {
+    const drift = compareContract(
+      { contractVersion: channel.lastVerified.contractVersion, contractDigest: channel.lastVerified.contractDigest },
+      { contractVersion: CONTRACT_VERSION, contractDigest: contractDigest() }
     );
+    console.log(
+      drift.verdict === 'ok'
+        ? `note  channel "${channel.name}" was last verified serving this exact contract (${channel.lastVerified.contractDigest})`
+        : `note  channel "${channel.name}" was last verified serving ${channel.lastVerified.contractDigest}; this checkout builds ${contractDigest()} — normal until it is deployed`
+    );
+  } else {
+    console.log(`note  channel "${channel.name}" has never been verified (lastVerified is null)`);
   }
 
-  // Then, if the channel is reachable, check the deployed hub too. Unreachable is NOT a
-  // failure: a fork's pull request has no route to Azure, and CI must not depend on one.
+  // If the channel answers, the DEPLOYED hub must be serving what this checkout builds.
+  // That is the real cascade check, and it is the one that matters before a promotion.
+  // Unreachable is NOT a failure: a fork's pull request has no route to Azure, and CI
+  // must not depend on one.
   const deployed = await fetchDeployedIdentity(channel, timeoutMs);
   if (!deployed.reachable) {
-    console.log(`note  channel "${channel.name}" is not reachable from here, so the deployed digest was not checked (${deployed.reason})`);
+    console.log(`note  channel "${channel.name}" is not reachable from here, so the deployed contract was not checked (${deployed.reason})`);
   } else {
-    const verdict = compareContract({ contractVersion: channel.contractVersion, contractDigest: channel.contractDigest }, deployed.identity);
+    const verdict = compareContract({ contractVersion: CONTRACT_VERSION, contractDigest: contractDigest() }, deployed.identity);
     if (verdict.verdict === 'breaking') {
-      problems.push(`BREAKING: ${deployed.versionUrl} — ${verdict.reason}. These clients cannot talk to that hub; they must be upgraded.`);
+      problems.push(`BREAKING: ${deployed.versionUrl} — ${verdict.reason}. Clients generated here cannot talk to that hub.`);
     } else if (verdict.verdict !== 'ok') {
       problems.push(
-        `channel "${channel.name}" pin (${channel.contractDigest}) does not match the deployed hub (${deployed.identity.contractDigest}) — ` +
-          `${verdict.reason}. Run --sync-pin after the deploy has been verified.`
+        `channel "${channel.name}" serves contract ${deployed.identity.contractDigest} but this checkout builds ${contractDigest()} — ` +
+          `${verdict.reason}. Deploy this commit to that channel before shipping clients generated from it.`
       );
     } else {
-      console.log(`ok    deployed hub at ${deployed.versionUrl} serves the pinned contract ${deployed.identity.contractDigest}`);
+      console.log(`ok    deployed hub at ${deployed.versionUrl} serves this checkout's contract ${deployed.identity.contractDigest}`);
       console.log(`ok    deployed commit ${deployed.identity.commit} on channel ${deployed.identity.channel}`);
     }
   }
@@ -310,9 +333,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  console.log(
-    `ok    channel "${channel.name}" is in sync across ${rendered.length} client(s) — contract ${channel.contractDigest} (${channel.contractVersion})`
-  );
+  console.log(`ok    channel "${channel.name}" is in sync across ${rendered.length} client(s) — contract ${contractDigest()} (${CONTRACT_VERSION})`);
 }
 
 module.exports = { renderAll, headersFor, resolveChannel, writeMcpJson, writeToml, WRITERS, SERVER_NAME, CHANNELS_PATH, getClient };
