@@ -1,6 +1,6 @@
 {
   "name": "pivotly-ai",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Pivotly AI monorepo: contract (source of truth), hub (cloud MCP server), and the Axle Claude client.",
   "engines": {
@@ -9,27 +9,28 @@
   "workspaces": [
     "packages/contract",
     "packages/hub",
-    "packages/clients/axle",
+    "packages/clients",
     "e2e"
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "test:contract": "npm test -w @pivotly/contract",
     "test:hub": "npm test -w @pivotly/hub",
-    "test:axle": "npm test -w @pivotly/axle",
     "contract:digest": "node packages/contract/bin/contract-digest.js",
     "contract:verify": "node packages/contract/bin/contract-digest.js --verify",
     "versions:verify": "node scripts/verify-versions.js",
     "dev:hub": "npm run dev -w @pivotly/hub",
     "hub:selftest": "npm run selftest -w @pivotly/hub",
     "smoke": "node --env-file-if-exists=.env packages/hub/scripts/smoke-remote.js",
-    "e2e": "npm run e2e -w @pivotly/e2e",
-    "axle:autopatch": "npm run autopatch -w @pivotly/axle",
-    "axle:verify": "npm run verify -w @pivotly/axle",
-    "verify:upstream": "npm run verify:upstream -w @pivotly/hub",
-    "dev:api": "node --env-file-if-exists=.env packages/hub/scripts/fake-platform-api.js --port=8790",
+    "e2e": "node --env-file-if-exists=.env e2e/run.js",
     "package:hub": "node scripts/package-hub.js",
-    "verify:all": "npm run contract:verify && npm run versions:verify && npm test && npm run axle:verify",
-    "ci:local": "node scripts/ci-local.js"
+    "verify:all": "npm run contract:verify && npm run versions:verify && npm test && npm run clients:verify && npm run clients:check",
+    "ci:local": "node scripts/ci-local.js",
+    "test:clients": "npm test -w @pivotly/clients",
+    "clients:generate": "node packages/clients/scripts/generate.js --write",
+    "clients:check": "node packages/clients/scripts/generate.js --check",
+    "clients:print": "node packages/clients/scripts/generate.js --print",
+    "clients:verify": "node packages/clients/scripts/verify.js",
+    "clients:sync-pin": "node packages/clients/scripts/generate.js --sync-pin"
   }
 }

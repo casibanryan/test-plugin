@@ -1,32 +1,25 @@
 // packages/contract/src/errors.js
-// Error codes shared by hub and clients. The code is the stable API; the message is
-// not. Clients branch on `code`, so adding one is minor and renaming one is major.
+// Error codes shared by the hub and every client. The code is the stable API; the
+// message is not. Clients branch on `code`, so adding one is minor and renaming one is
+// major.
+//
+// Deliberately small. There are no auth codes because the hub is anonymous — it serves
+// two pure functions and holds nothing worth protecting, so there is no credential to
+// be missing, invalid, or insufficiently scoped.
 
 'use strict';
 
 const ERROR_CODES = {
-  UNAUTHENTICATED: 'unauthenticated',       // no/!parseable credential
-  TOKEN_INVALID: 'token_invalid',           // credential presented but unknown/expired
-  FORBIDDEN_SCOPE: 'forbidden_scope',       // authenticated, lacks the tool's scope
-  FORBIDDEN_ALLOWLIST: 'forbidden_allowlist', // scope ok, MCP allow-list says no
-  FORBIDDEN_AUDIENCE: 'forbidden_audience',   // a client principal reached for a service-only tool
-  INVALID_INPUT: 'invalid_input',           // failed the contract input schema
-  NOT_FOUND: 'not_found',
-  CONFLICT: 'conflict',                     // e.g. job already claimed
-  UNAVAILABLE: 'unavailable',               // database/dependency down
-  INTERNAL: 'internal',
+  INVALID_INPUT: 'invalid_input', // failed the contract's input schema
+  NOT_FOUND: 'not_found',         // no such tool or route
+  UNAVAILABLE: 'unavailable',     // the server cannot serve right now
+  INTERNAL: 'internal',           // a bug; the caller is told nothing more
 };
 
-// HTTP status used when the failure happens before MCP framing (transport-level auth).
+// HTTP status used when a failure happens before MCP framing, i.e. at the transport.
 const HTTP_STATUS_FOR_CODE = {
-  [ERROR_CODES.UNAUTHENTICATED]: 401,
-  [ERROR_CODES.TOKEN_INVALID]: 401,
-  [ERROR_CODES.FORBIDDEN_SCOPE]: 403,
-  [ERROR_CODES.FORBIDDEN_ALLOWLIST]: 403,
-  [ERROR_CODES.FORBIDDEN_AUDIENCE]: 403,
   [ERROR_CODES.INVALID_INPUT]: 400,
   [ERROR_CODES.NOT_FOUND]: 404,
-  [ERROR_CODES.CONFLICT]: 409,
   [ERROR_CODES.UNAVAILABLE]: 503,
   [ERROR_CODES.INTERNAL]: 500,
 };
@@ -40,7 +33,7 @@ class PivotlyError extends Error {
     this.httpStatus = HTTP_STATUS_FOR_CODE[code] || 500;
   }
 
-  // Wire shape. Deliberately narrow: never leak a stack or a SQL message to a client.
+  // The wire shape. Deliberately narrow: never leak a stack to a caller.
   toJSON() {
     return { ok: false, code: this.code, message: this.message, ...(this.details ? { details: this.details } : {}) };
   }

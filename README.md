@@ -1,73 +1,64 @@
 # pivotly-ai
 
-A working reference for the Pivotly Claude client and the pipeline that ships it:
-a cloud-hosted MCP server on Azure App Service, a Claude Code plugin that talks to it,
-and a shared contract that makes a change to one fail loudly in the other.
+A working reference for shipping an MCP server and its clients: a stateless MCP hub on
+Azure App Service, two generated clients, and a shared contract that makes a change to
+one fail loudly in the others.
 
-Small enough to read in a sitting. The interesting parts are the contract, the
-client/service split, and the three test tiers.
+The hub does something deliberately trivial — it says hello and asks how your day is
+going. Everything else is **pipeline**, which is the part worth reading.
 
 ## The three workspaces
 
 | Workspace | What it is |
 | --- | --- |
-| [`packages/contract`](packages/contract) | the single source of truth — tool schemas, types, auth conventions, protocol and channel versions. Imports nothing from its siblings. |
-| [`packages/hub`](packages/hub) | the cloud MCP server. Stateless, no database; reads and writes through the Pivotly platform API. |
-| [`packages/clients/axle`](packages/clients/axle) | the Claude Code plugin. Connects over HTTPS and exposes a **read-only** surface. |
+| [`packages/contract`](packages/contract) | the single source of truth — tool schemas, error codes, protocol, channels, and the list of clients. Imports nothing from its siblings. |
+| [`packages/hub`](packages/hub) | the MCP server. Stateless, anonymous, no database, no upstream. |
+| [`packages/clients`](packages/clients) | every client, **generated** from one channel manifest: `axle` (Claude Code plugin) and `codex` (Codex CLI). |
 
-Full picture, and the reasoning behind each decision:
-**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+Reasoning behind each decision: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## Two rules that shape everything
 
-**The plugin cannot write.** The tool surface is split by audience. Client tools are
-read-only; write and queue tools are service-only and are refused three independent
-ways — the contract will not build a writable client tool, the hub never registers one
-for a client session (`tools/list` does not mention it), and the platform API rejects a
-client credential on every write endpoint. Only the last of those is out of reach of a
-bug in this repository, which is why it is the platform's job.
+**The hub owns nothing.** No database, no upstream API, no credentials, no state between
+requests. Two read-only tools computed from the arguments in the same request. A deploy
+is a process restart; there is nothing to migrate and nothing to lose.
 
-**The hub owns no data.** No connection string, no schema, no migrations, no state. It
-is a protocol adapter: MCP in, HTTPS out, forwarding the caller's own bearer token so
-the API authorises the end user rather than the hub. A deploy is a process restart.
+**Every client is generated.** A channel URL exists in exactly one place. Repointing
+every client at `dev` is one command, hand-edits fail CI, and two clients cannot
+disagree about the tool surface — they are the same data through different writers.
+
+### There is no authentication, on purpose
+
+The hub serves data you just sent it. Nothing is stored, nothing belongs to anyone, so a
+token would guard a time-of-day greeting. **Anyone who can reach the URL can call these
+tools.**
+
+That boundary is enforced rather than remembered — the contract **refuses to build** if
+any tool is not read-only:
+
+```
+tool danger_write declares readOnly: false — every tool on this hub must be
+read-only, because the hub serves them without authentication.
+```
+
+No digest, no lock, no CI pass, no artifact. The day a tool needs real data, the build
+stops and auth stops being optional.
 
 ## Try it
 
 ```sh
 npm ci
-cp .env.example .env   # required — the hub refuses to start without PIVOTLY_API_URL
+npm run dev:hub     # http://127.0.0.1:8787 — no .env, no token, no setup
 ```
 
-Then two terminals — the hub needs something to talk to, because it holds no data itself:
+Then speak MCP to it:
 
 ```sh
-npm run dev:api     # terminal 1 — a fake platform API on 8790 (a test double)
-npm run dev:hub     # terminal 2 — the hub on 8787
-```
-
-`.env` is read by Node's own `--env-file-if-exists`, so there's no `dotenv` and no import
-to add. Only the local-facing scripts read it; `npm start` deliberately does not, so a
-stray `.env` can never override a deployed channel's Azure App Settings.
-
-Then speak MCP to it. `dev-token` is a **client** credential; `worker-token` is a
-service one:
-
-```sh
-# a client is served three read-only tools
 curl -s -X POST http://127.0.0.1:8787/mcp \
   -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' \
-  -H 'authorization: Bearer dev-token' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-
-# and cannot reach the write tool, even by name
-curl -s -X POST http://127.0.0.1:8787/mcp \
-  -H 'content-type: application/json' \
-  -H 'accept: application/json, text/event-stream' \
-  -H 'authorization: Bearer dev-token' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
-       "params":{"name":"usdf_record_put","arguments":{"kind":"greeting.session","payload":{}}}}'
-# -> "Tool usdf_record_put not found"
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+       "params":{"name":"greeting_hello","arguments":{"name":"Resty","hour":9}}}'
 ```
 
 `GET /healthz`, `/readyz` and `/version` are the three probes the pipeline drives.
@@ -75,109 +66,108 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 ## Verify it
 
 ```sh
-npm run ci:local     # the whole offline pipeline — every check CI runs, same job names
-npm run verify:all   # contract lock, version coherence, all tests, client manifests
-npm run e2e          # all three tiers against a stack it boots itself
+npm run ci:local              # every offline CI job, same job names as the workflow
+npm run e2e                   # all three tiers against a hub it starts itself
+npm run e2e -- --all-channels # the whole ladder: local, dev, prerelease, production
 ```
 
-Start with `npm run ci:local`. It runs the same steps as
-[`_verify.yml`](.github/workflows/_verify.yml), reports per job, and a red job here is
-the job that would be red in CI. `--job=client` and `--skip=artifact` narrow it down.
+Start with `ci:local` — a red job there is the job that would be red in CI.
+`--job=clients` and `--skip=artifact` narrow it down.
 
-`npm run e2e` needs nothing running — with no `--hub-url` it stands up the fake API and
-the hub on ephemeral ports and runs the identical tier code that runs against
-production.
+`--all-channels` is the one to reach for when you want the state of every deployed rung
+at once. Channels that are not deployed are **skipped with a note**, not failed.
 
-Current state: 23 contract self-tests, 49 hub tests over a real socket, 22 client tests,
-70 manifest checks, 34 remote smoke checks, 40 upstream assumptions, 30 e2e checks
-across three tiers.
+Current state: 22 contract self-tests, 39 hub tests over a real socket, 25 client tests,
+97 client checks, 28 version checks, ~35 remote smoke checks, 50 e2e checks across three
+tiers.
 
-## Install the plugin
+## Install a client
 
-The repo is its own marketplace. In Claude Code:
+**Claude Code** — the repo is its own marketplace:
 
 ```
-/plugin marketplace add OWNER/REPO
+/plugin marketplace add casibanryan/test-plugin
 /plugin install axle@pivotly
 ```
 
-Set `PIVOTLY_MCP_TOKEN` to a Pivotly **client** token first. To point at a different
-channel:
+**Codex CLI** — append the generated block:
 
 ```sh
-PIVOTLY_CHANNEL=prerelease npm run axle:autopatch -- --write
+cat packages/clients/codex/config.toml >> ~/.codex/config.toml
 ```
 
-Private repos work — Claude Code clones with your existing git credentials. Background
-auto-updates cannot authenticate to private *HTTPS* remotes, so prefer SSH or run
-`gh auth setup-git` once.
+Neither needs a token. To point every client at a different channel:
 
-## The pipeline
-
-[**docs/PIPELINE.md**](docs/PIPELINE.md) has the stage-by-stage walkthrough, the
-required secrets and variables, and the one-time Azure setup.
-
-```
-CI   contract ─► unit (Node 20, 22) ─► client ─► artifact ─► e2e (3 tiers)
-
-CD   verify ─► pre-release slot ─► verify the slot ─► [approval] ─► slot swap
-            ─► verify production ─► sync the client pin ─► release
-                                 └─► roll back (another swap) if production fails
+```sh
+PIVOTLY_CHANNEL=dev npm run clients:generate
 ```
 
-Three things worth knowing about it:
+Switch back to `production` before committing — CI fails on the drift, by design.
 
-- **The artifact is built once**, scanned, self-tested from the packaged tree, and then
-  deployed byte for byte. No rebuild that is hopefully identical.
-- **The deploy is never trusted.** It polls `/version` for the commit it just pushed and
-  `/readyz` for actual readiness. An instance can be up, serving the previous build, and
-  answer `200` on `/healthz` the whole time.
-- **The client's channel pin moves last**, after production verification, so it always
-  trails a verified deploy and can never name a build that was rolled back.
+## The channel ladder
+
+Four channels, **three different triggers**, which is the point of having four:
+
+```
+push to main   ──►  dev          no gate, deploys every merge
+tag v*.*.*     ──►  prerelease   verified, then held at an approval
+               ──►  production   slot swap from prerelease, verified again
+local                            your machine
+```
+
+Every deploy job polls `/version` for **its own commit SHA** before declaring success —
+an instance can be up, serving the previous build, and answer `200` on `/healthz` the
+whole time. Each rung then advances its own channel pin, so `channels.json` records what
+each channel is *proven* to be serving.
+
+Stage-by-stage walkthrough, required secrets, and the one-time Azure setup:
+**[docs/PIPELINE.md](docs/PIPELINE.md)**.
 
 ## The contract digest
 
-One 12-hex string over the whole tool surface. It lives in three places that must agree:
-the committed lock, the deployed hub's `/version`, and the client's channel pin.
+One 12-hex string over the whole surface, in three places that must agree: the committed
+lock, the deployed hub's `/version`, and the clients' channel pin.
 
-That is the guard against the failure this repository is really built around: core
-changes, the hub redeploys cleanly, every hub-side check passes, the client manifest
-still pins the old surface, and the breakage arrives days later in someone's editor.
-`e2e/tiers/tier3-client.js` compares all three, names which pair disagrees, and then
-compares the served surface field by field.
+That is the guard against the failure this repository is built around: core changes, the
+hub redeploys cleanly, every hub-side check passes, the clients still point at the old
+surface, and the breakage arrives days later in someone's editor.
+[`tier3-clients.js`](e2e/tiers/tier3-clients.js) compares all three, names which pair
+disagrees, then compares the served surface field by field.
 
 ## Adding a tool
 
 1. Add a descriptor to [`packages/contract/src/tools.js`](packages/contract/src/tools.js).
-   Pick its `audience` — `client` tools **must** be `readOnly`, and the digest builder
-   refuses to build a contract that breaks that.
+   It **must** be `readOnly` — the digest builder refuses anything else.
 2. Add a handler in [`packages/hub/src/tools/index.js`](packages/hub/src/tools/index.js).
-   The hub asserts the declared and implemented sets are equal at boot, so a mismatch is
-   a startup failure rather than a broken tool call.
-3. `npm run contract:digest -- --write` and commit the lock — the diff is the review.
+   The hub asserts the declared and implemented sets match at boot.
+3. `npm run contract:digest -- --write` and `npm run clients:generate`.
 4. `npm run verify:all`.
+
+## Adding a client
+
+1. Add an entry to `CLIENTS` in [`packages/contract/src/protocol.js`](packages/contract/src/protocol.js).
+2. If it needs a new config format, add a writer in
+   [`packages/clients/scripts/generate.js`](packages/clients/scripts/generate.js).
+3. `npm run clients:generate`.
+
+`verify.js` and the version check iterate the contract's client list, so a new client
+comes under every existing check automatically.
 
 ## A note on scope
 
-This was built from a written brief describing five layers: the monorepo boundaries, a
-database and security layer, an Azure container pipeline, multi-tier testing, and client
-channel management. Two deliberate departures, both discussed and decided during the
-work:
+Built from a brief describing five layers: monorepo boundaries, a database and security
+layer, an Azure container pipeline, multi-tier testing, and client channel management.
+Three deliberate departures, each decided during the work:
 
-- **No database or `SECURITY DEFINER` layer in this repo.** An earlier revision had one,
-  including PostgreSQL schemas, a job-claim mechanism and CSV-driven allow-lists. It was
-  removed because a component sitting behind an editor plugin should not hold a database
-  credential — the platform API already owns the schema and the access rules. What
-  survives is [`verify-upstream.js`](packages/hub/scripts/verify-upstream.js), which
-  asserts the API behaviours the hub depends on, including that a client credential is
-  refused on every write.
+- **No database or `SECURITY DEFINER` layer.** An earlier revision had one — PostgreSQL
+  schemas, a job-claim mechanism, CSV allow-lists. Removed: a component sitting behind
+  an editor plugin should not hold a database credential.
 - **No container or registry.** App Service run-from-package deploys the Node app
-  directly. A container image bought an immutable artifact and a layer scan; the
-  artifact digest in [`scripts/package-hub.js`](scripts/package-hub.js) and
-  `npm audit --omit=dev` cover the same ground for a Node process with no OS layer of
-  its own.
+  directly. The artifact digest in [`scripts/package-hub.js`](scripts/package-hub.js) and
+  `npm audit --omit=dev` cover what a layer scan would, for a process with no OS layer.
+- **No authentication.** With no stored data there is nothing to protect, and the
+  read-only invariant in the contract is what keeps that honest as the surface grows.
 
-The brief also linked a Microsoft Whiteboard board. That link requires a Microsoft
-account sign-in and could not be read, so the architecture here is derived from the five
-written layers rather than the board — worth a check against it before this is treated
-as settled.
+The brief also linked a Microsoft Whiteboard board that requires a sign-in and could not
+be read, so this is derived from the five written layers rather than the board — worth
+checking against it before treating the layout as settled.

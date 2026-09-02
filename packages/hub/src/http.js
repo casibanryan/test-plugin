@@ -1,25 +1,21 @@
 // packages/hub/src/http.js
-// The cloud transport: Streamable HTTP MCP on /mcp, plus the three probe endpoints the
+// The cloud transport: Streamable HTTP MCP on /mcp, plus the three probes the
 // deployment pipeline drives.
 //
-// Stateless by choice. Each POST /mcp is authenticated, given its own McpServer and
-// transport, answered, and torn down. No session map, no sticky routing, no state to
-// lose — which is what makes the App Service story simple: instances can be added,
-// recycled, or swapped between slots mid-flight and no client notices.
+// ANONYMOUS BY DESIGN. There is no Authorization header and no credential check. The
+// hub serves two pure functions over data the caller supplied in the same request — no
+// database, no upstream API, no tenant data, nothing that belongs to anyone. There is
+// therefore nothing for auth to protect, and adding a token would be theatre: it would
+// have to be distributed to every client and would guard a time-of-day greeting.
 //
-// The probes are not decoration; each one answers a different question the pipeline
-// asks at a different moment, and the split between the first two is load-bearing:
+// What that does mean, stated plainly so nobody is surprised later: anyone who can
+// reach the URL can call these tools. The moment a tool touches real data, auth stops
+// being optional — and the contract enforces that boundary, refusing to build if any
+// tool is not read-only (see packages/contract/src/digest.js).
 //
-//   /healthz   is the PROCESS alive?  Never calls upstream. If liveness depended on
-//              the platform API, an API outage would make App Service conclude every
-//              hub instance was broken and restart the whole fleet — turning someone
-//              else's incident into ours.
-//   /readyz    can this instance SERVE?  Calls the platform API's own health endpoint,
-//              so an instance that cannot reach its only data source stops taking
-//              traffic. This is the gate a deploy waits on before a slot swap.
-//   /version   which build is this?  The deploy polls it for the commit it just
-//              pushed, and the Axle autopatch compares its contract digest against
-//              what the client was shipped with.
+// Stateless: each POST /mcp gets its own McpServer and transport, answered and torn
+// down. No session map, no sticky routing, nothing to lose — which is what makes the
+// App Service story simple: instances can be added, recycled or slot-swapped mid-flight.
 
 'use strict';
 
@@ -27,11 +23,10 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
-const { ENDPOINTS, VERSION_PAYLOAD_KEYS } = require('@pivotly/contract/protocol');
-const { HEADERS } = require('@pivotly/contract/auth');
+const { ENDPOINTS, HEADERS, VERSION_PAYLOAD_KEYS } = require('@pivotly/contract/protocol');
 const { ERROR_CODES, PivotlyError, isPivotlyError } = require('@pivotly/contract/errors');
 
-const { createMcpServer } = require('./mcp');
+const { createMcpServer, assertHandlersMatchContract } = require('./mcp');
 
 function sendJson(res, status, body, requestId) {
   const payload = JSON.stringify(body);
@@ -57,10 +52,10 @@ function readBody(req, limitBytes) {
       size += chunk.length;
       if (size > limitBytes) {
         over = true;
-        chunks.length = 0; // stop holding what we have already refused
-        // Drain the rest instead of destroying the request. Destroying tears down the
-        // socket, so the 400 this rejection produces would never reach the client —
-        // they would see a connection reset and have no idea why.
+        chunks.length = 0;
+        // Drain rather than destroy: destroying the request tears down the socket, so
+        // the 400 this produces would never reach the client — they would see a
+        // connection reset and have no idea why.
         req.resume();
         reject(new PivotlyError(ERROR_CODES.INVALID_INPUT, `request body exceeds ${limitBytes} bytes`));
         return;
@@ -75,61 +70,11 @@ function readBody(req, limitBytes) {
   });
 }
 
-function createHttpServer({ upstream, config, logger, authenticator }) {
-  // Readiness is cached briefly. App Service and the deploy loop both poll it, and an
-  // upstream round trip per poll is waste — but caching a *failure* would delay
-  // noticing recovery, so only success is cached.
-  let readyCache = { at: 0, body: null };
-  const READY_TTL_MS = 2000;
-
-  async function handleReady(res, requestId) {
-    const now = Date.now();
-    if (readyCache.body && now - readyCache.at < READY_TTL_MS) {
-      return sendJson(res, 200, readyCache.body, requestId);
-    }
-
-    try {
-      const upstreamHealth = await upstream.health(requestId);
-      const body = {
-        ok: true,
-        ready: true,
-        channel: config.channel,
-        upstream: { url: upstream.baseUrl, reachable: true, reported: upstreamHealth ?? null },
-      };
-      readyCache = { at: now, body };
-      return sendJson(res, 200, body, requestId);
-    } catch (err) {
-      // The hub has no data of its own, so an unreachable API means this instance
-      // cannot serve anything but the two in-process greeting tools. Reporting ready
-      // would let a deploy swap it into production and call that a success.
-      const code = isPivotlyError(err) ? err.code : ERROR_CODES.UNAVAILABLE;
-      logger.error('readiness check failed', { requestId, upstream: upstream.baseUrl, error: err.message });
-      return sendJson(
-        res,
-        503,
-        { ok: false, ready: false, code, message: 'the platform API is not reachable from this instance', upstream: { url: upstream.baseUrl, reachable: false } },
-        requestId
-      );
-    }
-  }
-
+function createHttpServer({ config, logger }) {
   async function handleMcp(req, res, requestId) {
     // The transport writes this response, not sendJson, so the correlation header has
-    // to be set before it takes over — otherwise the one path a client actually uses
-    // is the one path it cannot correlate to a log line.
+    // to be set before it takes over.
     res.setHeader(HEADERS.requestId, requestId);
-
-    let principal;
-    try {
-      principal = await authenticator.authenticate(req.headers, requestId);
-    } catch (err) {
-      // Authentication fails at the transport layer, before any MCP framing exists,
-      // so it is answered as HTTP rather than as a JSON-RPC error.
-      const wire = isPivotlyError(err) ? err : new PivotlyError(ERROR_CODES.UNAUTHENTICATED, 'authentication failed');
-      logger.warn('mcp request rejected', { requestId, code: wire.code });
-      res.setHeader('www-authenticate', 'Bearer realm="pivotly-hub"');
-      return sendJson(res, wire.httpStatus, wire.toJSON(), requestId);
-    }
 
     let body;
     try {
@@ -140,20 +85,52 @@ function createHttpServer({ upstream, config, logger, authenticator }) {
       return sendJson(res, wire.httpStatus, wire.toJSON(), requestId);
     }
 
-    // Stateless: sessionIdGenerator undefined. One server and one transport per
-    // request, discarded when the response is done.
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    const server = createMcpServer({ principal, upstream, config, logger, authenticator, requestId });
+    const server = createMcpServer({
+      config,
+      logger,
+      requestId,
+      client: req.headers[HEADERS.client] || null,
+      channel: req.headers[HEADERS.channel] || null,
+    });
 
     res.on('close', () => {
-      // Closing in this order matters: the transport must stop before the server it
-      // is attached to, or an in-flight write can outlive its own server.
+      // Order matters: the transport must stop before the server it is attached to, or
+      // an in-flight write can outlive its own server.
       transport.close().catch((e) => logger.debug('transport close', { requestId, error: e.message }));
       server.close().catch((e) => logger.debug('server close', { requestId, error: e.message }));
     });
 
     await server.connect(transport);
     await transport.handleRequest(req, res, body);
+  }
+
+  // Readiness. With no database and no upstream, there is no dependency to probe — so
+  // rather than duplicating /healthz, this re-verifies that THIS BUILD is coherent:
+  // the contract and handler registry still agree, and every declared schema still
+  // builds. That is cheap, and it is exactly the failure a bad package or a partial
+  // deploy produces. The two probes stay separate anyway because App Service points
+  // its health check at one of them and the deploy gate polls it.
+  function handleReady(res, requestId) {
+    try {
+      const { tools } = assertHandlersMatchContract();
+      return sendJson(
+        res,
+        200,
+        {
+          ok: true,
+          ready: true,
+          channel: config.channel,
+          contractDigest: config.identity.contractDigest,
+          tools,
+          dependencies: [], // deliberately none — see the note at the top of this file
+        },
+        requestId
+      );
+    } catch (err) {
+      logger.error('readiness check failed — this build is not coherent', { requestId, error: err.message });
+      return sendJson(res, 503, { ok: false, ready: false, code: ERROR_CODES.INTERNAL, message: 'this build is not serving a coherent tool surface' }, requestId);
+    }
   }
 
   const server = http.createServer((req, res) => {
@@ -163,15 +140,17 @@ function createHttpServer({ upstream, config, logger, authenticator }) {
     const path = url.pathname.replace(/\/+$/, '') || '/';
 
     res.on('finish', () => {
-      // One line per request. The client's channel and contract version are logged
-      // because "which client versions are still calling us" is the question you need
-      // answered before retiring a contract.
+      // One line per request. The calling client and its contract version are logged
+      // because "which clients are still on the old contract" is the question you have
+      // to answer before retiring one — and with several clients, you need to know
+      // which of them to chase.
       logger.info('http', {
         requestId,
         method: req.method,
         path,
         status: res.statusCode,
         ms: Date.now() - started,
+        client: req.headers[HEADERS.client] || null,
         clientChannel: req.headers[HEADERS.channel] || null,
         clientContract: req.headers[HEADERS.clientContract] || null,
       });
@@ -179,8 +158,6 @@ function createHttpServer({ upstream, config, logger, authenticator }) {
 
     (async () => {
       if (path === ENDPOINTS.health) {
-        // Deliberately dependency-free: liveness must not fail because the platform
-        // API did. See the note at the top of this file.
         return sendJson(res, 200, { ok: true, alive: true, channel: config.channel, uptimeSeconds: Math.round(process.uptime()) }, requestId);
       }
 
@@ -189,7 +166,6 @@ function createHttpServer({ upstream, config, logger, authenticator }) {
       if (path === ENDPOINTS.version) {
         const body = {};
         for (const key of VERSION_PAYLOAD_KEYS) body[key] = config.identity[key] ?? null;
-        body.upstream = upstream.baseUrl;
         return sendJson(res, 200, body, requestId);
       }
 

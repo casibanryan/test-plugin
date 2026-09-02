@@ -1,11 +1,11 @@
 {
   "name": "axle",
-  "version": "0.2.0",
-  "description": "Axle: the Pivotly Claude client. Connects Claude Code to the Pivotly MCP hub over HTTPS and exposes the platform's read-only tool surface. Requires PIVOTLY_MCP_TOKEN.",
+  "version": "0.3.0",
+  "description": "Axle: the Pivotly Claude Code client. Connects Claude Code to the Pivotly MCP hub over HTTPS and exposes its read-only greeting tools. No token or setup required.",
   "author": {
     "name": "Pivotly"
   },
-  "homepage": "https://github.com/pivotly/pivotly-ai",
+  "homepage": "https://github.com/casibanryan/test-plugin",
   "keywords": [
     "pivotly",
     "mcp",

@@ -20,9 +20,8 @@
 //     covers the part of a Node app where the real risk is; there is no OS package
 //     layer left to scan.
 //
-// Deliberately NOT included: devDependencies, tests, the fake platform API, the client
-// package, and docs. A test double that ships to production is a test double that can
-// be reached in production.
+// Deliberately NOT included: devDependencies, tests, the test harness, the client
+// package, and docs. The deployed artifact is the hub and its contract, nothing else.
 
 'use strict';
 
@@ -50,10 +49,9 @@ const INCLUDE = [
   'packages/hub/src',
 ];
 
-// scripts/ is included except for the test double, because the pipeline runs the smoke
-// test from inside the artifact — the thing being tested and the thing doing the
-// testing are then the same build.
-const INCLUDE_SCRIPTS = ['smoke-remote.js', 'verify-upstream.js'];
+// The smoke test travels with the artifact, because the pipeline runs it from inside:
+// the thing being tested and the thing doing the testing are then the same build.
+const INCLUDE_SCRIPTS = ['smoke-remote.js'];
 
 function copyRecursive(from, to) {
   const stat = fs.statSync(from);

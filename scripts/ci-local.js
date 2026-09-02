@@ -15,9 +15,9 @@
 // What this does NOT prove, and cannot:
 //   * that the workflow YAML is wired correctly (job needs, matrix, artifact upload)
 //   * anything about Azure — the deploy, the slot swap, or the App Settings
-//   * tier 1 against your real platform API. Locally it runs against the test double,
-//     which was written to match the hub's assumptions, so it agrees with them by
-//     construction. It only becomes evidence when pointed at the real API.
+//   * that a DEPLOYED channel is healthy. The e2e job runs against a hub this process
+//     started, so it proves the code; only `npm run e2e -- --hub-url=...` against a
+//     real channel proves the deployment.
 //
 // The job names below mirror the workflow's job names exactly, so a failure here tells
 // you which CI job would have gone red.
@@ -79,14 +79,14 @@ const JOBS = [
   },
   {
     name: 'client',
-    describe: 'plugin manifests, channels, skills, and a simulated marketplace install',
+    describe: 'every client config, channel pins, skills, and a simulated marketplace install',
     steps: [
       {
         label: 'Manifests validate against the plugin schema',
         run: () => run('npx', ['--yes', '@anthropic-ai/claude-code', 'plugin', 'validate', './packages/clients/axle']),
       },
-      { label: 'Axle manifests, channels, and skills', run: () => run('npm', ['run', 'axle:verify']) },
-      { label: 'The client channel manifest is in sync', run: () => run('npm', ['run', 'axle:autopatch', '--', '--check', '--timeout-ms=3000']) },
+      { label: 'Client configs, channel pins, and skills', run: () => run('npm', ['run', 'clients:verify']) },
+      { label: 'Every client config matches the channel manifest', run: () => run('npm', ['run', 'clients:check', '--', '--timeout-ms=3000']) },
       { label: 'A marketplace install would get a working plugin', run: simulateMarketplaceInstall },
     ],
   },
@@ -100,14 +100,14 @@ const JOBS = [
         run: () => run('npm', ['audit', '--omit=dev', '--audit-level=high', '--workspace', '@pivotly/hub', '--include-workspace-root']),
       },
       { label: 'Build the artifact', run: buildArtifact },
-      { label: 'The test double is not in the artifact', run: assertArtifactIsClean },
+      { label: 'Only the hub is in the artifact', run: assertArtifactIsClean },
       { label: 'The artifact boots and self-tests', run: selftestArtifact },
     ],
   },
   {
     name: 'e2e-local',
-    describe: 'all three tiers against a locally booted stack',
-    steps: [{ label: 'All three tiers against a local stack', run: () => run('npm', ['run', 'e2e']) }],
+    describe: 'contract, protocol and client tiers against a hub it boots itself',
+    steps: [{ label: 'All three tiers against a local hub', run: () => run('npm', ['run', 'e2e']) }],
   },
 ];
 
@@ -123,10 +123,10 @@ function buildArtifact() {
 
 function assertArtifactIsClean() {
   const forbidden = [
-    ['packages/hub/scripts/fake-platform-api.js', 'the fake platform API'],
     ['packages/hub/test', 'hub tests'],
     ['packages/hub/testkit', 'the test harness'],
-    ['packages/clients', 'the client package'],
+    ['packages/clients', 'the clients package'],
+    ['e2e', 'the e2e suite'],
   ];
   const found = forbidden.filter(([rel]) => fs.existsSync(path.join(ARTIFACT_DIR, rel)));
   if (found.length) {
@@ -139,10 +139,9 @@ function assertArtifactIsClean() {
 function selftestArtifact() {
   // No API reachable, on purpose: --selftest must work inside a fresh deploy before
   // anything has been wired up.
-  const result = run('node', ['packages/hub/src/index.js', '--selftest'], {
-    cwd: ARTIFACT_DIR,
-    env: { PIVOTLY_API_URL: 'https://api.invalid.example' },
-  });
+  // Needs no configuration at all: --selftest must work inside a fresh deploy before
+  // anything has been wired up.
+  const result = run('node', ['packages/hub/src/index.js', '--selftest'], { cwd: ARTIFACT_DIR });
   if (result.code !== 0) return result;
 
   const selftest = JSON.parse(result.out);
@@ -190,9 +189,15 @@ function simulateMarketplaceInstall() {
     const server = Object.values(mcp.mcpServers)[0];
     if (server.type !== 'http') problems.push(`the shipped server is "${server.type}", not http`);
     if (!/^https:\/\//.test(server.url)) problems.push(`the shipped url is not https: ${server.url}`);
-    const auth = (server.headers || {}).authorization || '';
-    if (!/^Bearer \$\{[A-Z_][A-Z0-9_]*\}$/.test(auth)) problems.push(`a literal credential may be committed: "${auth}"`);
-    if (!problems.length) return { code: 0, out: `ok    a clean install points at ${server.url}` };
+
+    // The hub is anonymous, so a shipped config must carry NO credential at all —
+    // neither a literal one nor a placeholder implying the user should find one.
+    const raw = fs.readFileSync(path.join(pluginDir, '.mcp.json'), 'utf8');
+    if (/authorization/i.test(raw)) problems.push('the shipped config declares an Authorization header, but the hub is anonymous');
+    const suspicious = raw.match(/\b[A-Za-z0-9_-]{32,}\b/g) || [];
+    if (suspicious.length) problems.push(`the shipped config contains something token-shaped: ${suspicious.slice(0, 2).join(', ')}`);
+
+    if (!problems.length) return { code: 0, out: `ok    a clean install points at ${server.url}, with no credential` };
   }
 
   return { code: 1, out: problems.map((p) => `FAIL  ${p}`).join('\n') };
@@ -267,7 +272,8 @@ function main() {
   } else {
     console.log('ok    every offline CI job passes on this machine');
     console.log('note  this proves the STEPS, not the workflow wiring, and nothing about Azure.');
-    console.log('      Tier 1 ran against the test double; point it at your real API for that to mean something.');
+    console.log('      The e2e job ran against a hub this process started. To check a deployed');
+    console.log('      channel:  npm run e2e -- --hub-url=<channel url> --channel=<name>');
   }
 }
 

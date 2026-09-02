@@ -1,29 +1,28 @@
 // packages/hub/src/mcp.js
-// Builds an McpServer for one authenticated session.
+// Builds an McpServer for one request.
 //
-// The server is built PER PRINCIPAL, not once at boot, and that is the point: it
-// registers only the tools that principal's kind is entitled to. A client session's
-// `tools/list` therefore does not mention `usdf_record_put` at all — it is not
-// described, not schema'd, and not callable. There is nothing for a model to be talked
-// into trying and nothing for a prompt injection to name.
-//
-// Everything registered here comes from the contract: the name, the title, the
+// Everything registered here comes from the contract: the tool name, the title, the
 // description the model reads, and the zod input schema. Nothing is restated locally,
 // so the tool a client sees and the tool the hub validates cannot drift apart.
+//
+// A server is built per request rather than once at boot because the transport is
+// stateless (see src/http.js). It is cheap — two tool registrations over pure
+// functions — and it is what lets instances be recycled or slot-swapped mid-flight
+// without a client noticing.
 
 'use strict';
 
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
-const { TOOLS, TOOL_NAMES, toolsForKind } = require('@pivotly/contract/tools');
-const { zodInputShapeFor } = require('@pivotly/contract/zod');
+const { TOOLS, TOOL_NAMES } = require('@pivotly/contract/tools');
+const { zodInputShapeFor, allInputShapes } = require('@pivotly/contract/zod');
 const { isPivotlyError, PivotlyError, ERROR_CODES } = require('@pivotly/contract/errors');
 
 const { HANDLERS } = require('./tools');
 
 // Boot-time coherence check: the contract and the implementation must describe exactly
-// the same tool set. Running this once at startup turns "declared but not implemented"
-// into a crash on deploy — which the pipeline's health gate catches — instead of a
-// tools/call that fails for one unlucky user.
+// the same tool set, and every declared schema must actually build. Running this once
+// at startup turns "declared but not implemented" into a crash on deploy — which the
+// deploy gate catches — instead of a tools/call that fails for one unlucky user.
 function assertHandlersMatchContract() {
   const declared = TOOL_NAMES.slice().sort();
   const implemented = Object.keys(HANDLERS).sort();
@@ -35,6 +34,9 @@ function assertHandlersMatchContract() {
         `implemented but not declared: [${extra.join(', ')}]`
     );
   }
+  // Throws on the first malformed field descriptor.
+  allInputShapes();
+  return { tools: declared.length };
 }
 
 // MCP wants text content. Success is pretty JSON; a refusal is an isError result
@@ -43,23 +45,20 @@ const asText = (value) => ({ content: [{ type: 'text', text: JSON.stringify(valu
 
 function asError(err, logger, context) {
   if (isPivotlyError(err)) {
-    // Expected refusals (auth, scope, allow-list, bad input) are not warnings about
-    // the server; they are answers. Log at info and return the code.
+    // An expected refusal (bad input) is an answer, not a warning about the server.
     logger.info('tool refused', { ...context, code: err.code, reason: err.message });
     return { content: [{ type: 'text', text: JSON.stringify(err.toJSON(), null, 2) }], isError: true };
   }
-  // Anything else is a bug or an outage. Log it in full, tell the caller nothing.
+  // Anything else is a bug. Log it in full, tell the caller nothing.
   logger.error('tool threw', { ...context, error: err.message, stack: err.stack });
   const safe = new PivotlyError(ERROR_CODES.INTERNAL, 'internal error');
   return { content: [{ type: 'text', text: JSON.stringify(safe.toJSON(), null, 2) }], isError: true };
 }
 
-function createMcpServer({ principal, upstream, config, logger, authenticator, requestId }) {
+function createMcpServer({ config, logger, requestId, client, channel }) {
   const server = new McpServer({ name: config.identity.server, version: config.identity.serverVersion });
 
-  const visible = toolsForKind(principal.kind);
-
-  for (const tool of visible) {
+  for (const tool of TOOLS) {
     const handler = HANDLERS[tool.name];
 
     server.registerTool(
@@ -71,14 +70,12 @@ function createMcpServer({ principal, upstream, config, logger, authenticator, r
         inputSchema: zodInputShapeFor(tool.name),
       },
       async (args) => {
-        const context = { requestId, tool: tool.name, principal: principal.email, kind: principal.kind };
+        // `client` and `channel` come from request headers and are logged, not trusted:
+        // they say who claims to be calling, which is what makes "who is still on the
+        // old contract" answerable before retiring one.
+        const context = { requestId, tool: tool.name, client, channel };
         try {
-          // Re-run authorization at call time even though registration already
-          // filtered by audience. Registration is a convenience for the model;
-          // authorizeTool is the decision, and it is cheap enough to repeat.
-          authenticator.authorizeTool(principal, tool.name, requestId);
-          const result = await handler(args || {}, { principal, upstream, logger, requestId });
-          return asText(result);
+          return asText(await handler(args || {}, { logger, requestId }));
         } catch (err) {
           return asError(err, logger, context);
         }
@@ -86,32 +83,20 @@ function createMcpServer({ principal, upstream, config, logger, authenticator, r
     );
   }
 
-  logger.debug('built mcp server for session', {
-    requestId,
-    kind: principal.kind,
-    tools: visible.map((t) => t.name),
-  });
-
   return server;
 }
 
-// What the stateless self-test reports, and what the container smoke test asserts.
-// Uses the stateless client-surface tools only, so it needs no database and no token.
+// What --selftest reports, and what the pipeline asserts against a freshly packaged
+// build. Needs no network, no configuration and no dependency.
 function selftest(config) {
-  assertHandlersMatchContract();
+  const { tools } = assertHandlersMatchContract();
   return {
     ok: true,
     ...config.identity,
     node: process.version,
-    upstream: config.upstream.baseUrl,
-    tools: {
-      all: TOOL_NAMES,
-      client: toolsForKind('client').map((t) => t.name),
-      service: TOOLS.filter((t) => t.audience === 'service').map((t) => t.name),
-    },
-    samples: {
-      greeting_hello: { greeting: 'Good morning, World!', hour: 9 },
-    },
+    toolCount: tools,
+    tools: TOOL_NAMES,
+    anonymous: true,
   };
 }
 

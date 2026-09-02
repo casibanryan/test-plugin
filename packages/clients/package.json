@@ -1,0 +1,24 @@
+{
+  "name": "@pivotly/clients",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Every Pivotly client, generated from one contract and one channel manifest. Axle is the Claude Code plugin; codex targets the Codex CLI. Adding a client is a data change in the contract plus a writer here.",
+  "engines": {
+    "node": ">=20.18.0"
+  },
+  "scripts": {
+    "test": "node --test",
+    "generate": "node scripts/generate.js --write",
+    "check": "node scripts/generate.js --check",
+    "print": "node scripts/generate.js --print",
+    "sync-pin": "node scripts/generate.js --sync-pin",
+    "verify": "node scripts/verify.js"
+  },
+  "dependencies": {
+    "@pivotly/contract": "*"
+  },
+  "exports": {
+    "./scripts/generate": "./scripts/generate.js",
+    "./channels.json": "./channels.json"
+  }
+}

@@ -2,19 +2,30 @@
 // Deterministic digest of the whole contract surface.
 //
 // This one 12-hex string is the pipeline's cascade guard. It is:
-//   * committed to contract.lock.json           -> a contract edit can't land unnoticed
-//   * baked into the hub image and served at /version
-//   * pinned per channel in the Axle channel manifest
-// so "core changed but the client wasn't updated" becomes a failing check in CI rather
-// than a broken tool call in someone's editor.
+//   * committed to contract.lock.json               -> a contract edit can't land unnoticed
+//   * baked into the deployed build and served at /version
+//   * pinned per channel in packages/clients/channels.json
+// so "core changed but the clients weren't updated" becomes a failing check in CI
+// rather than a broken tool call in someone's editor.
+//
+// Because every client is generated from the same contract, one digest covers all of
+// them: if Axle and Codex are both built from this repo, they cannot disagree about the
+// tool surface without the digest saying so.
 
 'use strict';
 
 const crypto = require('node:crypto');
 const { TOOLS, FIELD_TYPES } = require('./tools');
-const { ALL_SCOPES, HEADERS, AUTH_SCHEME, SCOPE_PATTERN, PRINCIPAL_KEYS, PRINCIPAL_KINDS, AUDIENCES, isValidScope } = require('./auth');
 const { ERROR_CODES } = require('./errors');
-const { CONTRACT_VERSION, MCP_PROTOCOL_VERSION, SUPPORTED_MCP_PROTOCOL_VERSIONS, ENDPOINTS } = require('./protocol');
+const {
+  CONTRACT_VERSION,
+  MCP_PROTOCOL_VERSION,
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
+  ENDPOINTS,
+  HEADERS,
+  CLIENTS,
+  CHANNELS,
+} = require('./protocol');
 
 // Recursively sort object keys so JSON.stringify is order-independent. Without this,
 // moving a field up in the source would change the digest and fail CI for no reason.
@@ -32,13 +43,13 @@ function canonical(value) {
 }
 
 // Descriptor keys that participate in the digest. `describe` is deliberately included:
-// a tool description is part of what a model sees, so changing it IS a contract change
+// a tool description is part of what a model reads, so changing it IS a contract change
 // that clients should be told about.
 const FIELD_KEYS = ['type', 'optional', 'min', 'max', 'minItems', 'maxItems', 'values', 'describe'];
 
-// Tool-level keys that participate in the digest, so a new declaration key cannot be
-// added to tools.js and silently stay outside the hash.
-const TOOL_KEYS = ['name', 'audience', 'title', 'description', 'scopes', 'readOnly', 'touchesDatabase', 'input', 'output'];
+// Tool-level keys that participate, so a new declaration key cannot be added to
+// tools.js and silently stay outside the hash.
+const TOOL_KEYS = ['name', 'title', 'description', 'readOnly', 'input', 'output'];
 
 function assertValidField(toolName, section, key, field) {
   if (!field || typeof field !== 'object') throw new Error(`${toolName}.${section}.${key} is not a descriptor object`);
@@ -53,11 +64,11 @@ function assertValidField(toolName, section, key, field) {
   }
 }
 
-function normalizeField(field) {
+const normalizeField = (field) => {
   const out = {};
   for (const k of FIELD_KEYS) if (field[k] !== undefined) out[k] = field[k];
   return out;
-}
+};
 
 // Validates the whole contract while building the hashable view of it, so an invalid
 // contract can never produce a digest at all.
@@ -66,28 +77,20 @@ function contractSurface() {
     for (const req of ['name', 'title', 'description']) {
       if (!tool[req] || typeof tool[req] !== 'string') throw new Error(`tool ${tool.name || '<unnamed>'} is missing ${req}`);
     }
-    if (!Array.isArray(tool.scopes) || tool.scopes.length === 0) throw new Error(`tool ${tool.name} declares no scopes`);
-    for (const s of tool.scopes) if (!isValidScope(s)) throw new Error(`tool ${tool.name} declares invalid scope "${s}"`);
-    if (typeof tool.readOnly !== 'boolean') throw new Error(`tool ${tool.name} must declare readOnly`);
-    if (typeof tool.touchesDatabase !== 'boolean') throw new Error(`tool ${tool.name} must declare touchesDatabase`);
-    if (!AUDIENCES.includes(tool.audience)) {
-      throw new Error(`tool ${tool.name} must declare audience as one of ${AUDIENCES.join(' | ')}`);
-    }
-    if (tool.readOnly === false && tool.scopes.every((s) => s.endsWith(':read'))) {
-      throw new Error(`tool ${tool.name} is a write tool but requires only read scopes`);
-    }
 
-    // THE invariant behind "a client cannot write". A contract that puts a write tool
-    // on the client surface does not produce a digest at all, so it cannot be locked,
-    // cannot pass CI, and cannot be built into an image.
-    if (tool.audience === 'client' && tool.readOnly !== true) {
+    // THE invariant. This hub is anonymous — anyone who can reach the URL can call
+    // anything it serves — so every tool must be safe for an anonymous caller. A tool
+    // that writes, mutates, or reaches a credentialed system does not belong on this
+    // surface, and a contract declaring one does not produce a digest at all: it cannot
+    // be locked, cannot pass CI, and cannot be built into an artifact.
+    if (tool.readOnly !== true) {
       throw new Error(
-        `tool ${tool.name} is on the client surface but is not readOnly — client-facing tools must never write. ` +
-          `Give it audience: 'service' if a write is genuinely intended.`
+        `tool ${tool.name} declares readOnly: ${tool.readOnly} — every tool on this hub must be read-only, because the hub serves them without authentication.`
       );
     }
-    if (tool.audience === 'client' && tool.scopes.some((s) => !s.endsWith(':read') && s !== '*')) {
-      throw new Error(`tool ${tool.name} is on the client surface but requires the non-read scope "${tool.scopes.find((s) => !s.endsWith(':read'))}"`);
+
+    for (const k of Object.keys(tool)) {
+      if (!TOOL_KEYS.includes(k)) throw new Error(`tool ${tool.name} has unrecognised declaration key "${k}"`);
     }
 
     const section = (obj, label) =>
@@ -103,20 +106,11 @@ function contractSurface() {
       name: tool.name,
       title: tool.title,
       description: tool.description,
-      scopes: tool.scopes.slice().sort(),
       readOnly: tool.readOnly,
-      touchesDatabase: tool.touchesDatabase,
-      audience: tool.audience,
       input: section(tool.input, 'input'),
       output: section(tool.output, 'output'),
     };
   }).sort((a, b) => a.name.localeCompare(b.name));
-
-  for (const tool of TOOLS) {
-    for (const k of Object.keys(tool)) {
-      if (!TOOL_KEYS.includes(k)) throw new Error(`tool ${tool.name} has unrecognised declaration key "${k}"`);
-    }
-  }
 
   const names = tools.map((t) => t.name);
   const dup = names.find((n, i) => names.indexOf(n) !== i);
@@ -127,15 +121,11 @@ function contractSurface() {
     mcpProtocolVersion: MCP_PROTOCOL_VERSION,
     supportedMcpProtocolVersions: SUPPORTED_MCP_PROTOCOL_VERSIONS,
     endpoints: ENDPOINTS,
-    auth: {
-      scheme: AUTH_SCHEME,
-      headers: HEADERS,
-      scopes: ALL_SCOPES.slice().sort(),
-      scopePattern: SCOPE_PATTERN.source,
-      principalKeys: PRINCIPAL_KEYS.slice().sort(),
-      principalKinds: PRINCIPAL_KINDS.slice().sort(),
-      audiences: AUDIENCES.slice().sort(),
-    },
+    headers: HEADERS,
+    channels: CHANNELS,
+    // Client ids and formats are part of the surface: adding a client changes what this
+    // repo generates, and every client's config is verified against this digest.
+    clients: CLIENTS.map((c) => ({ id: c.id, format: c.format, configPath: c.configPath, plugin: c.plugin })),
     errorCodes: Object.values(ERROR_CODES).sort(),
     tools,
   });
@@ -146,11 +136,10 @@ function contractSurface() {
 const DIGEST_LENGTH = 12;
 
 function contractDigest() {
-  const json = JSON.stringify(contractSurface());
-  return crypto.createHash('sha256').update(json, 'utf8').digest('hex').slice(0, DIGEST_LENGTH);
+  return crypto.createHash('sha256').update(JSON.stringify(contractSurface()), 'utf8').digest('hex').slice(0, DIGEST_LENGTH);
 }
 
-// The full lock file body, so bin/contract-digest.js and the tests agree byte-for-byte.
+// The full lock file body, so bin/contract-digest.js and the tests agree byte for byte.
 function lockBody() {
   return {
     _comment:
@@ -158,13 +147,8 @@ function lockBody() {
     contractVersion: CONTRACT_VERSION,
     mcpProtocolVersion: MCP_PROTOCOL_VERSION,
     digest: contractDigest(),
-    tools: TOOLS.map((t) => ({
-      name: t.name,
-      audience: t.audience,
-      scopes: t.scopes.slice().sort(),
-      readOnly: t.readOnly,
-      touchesDatabase: t.touchesDatabase,
-    })).sort((a, b) => a.name.localeCompare(b.name)),
+    clients: CLIENTS.map((c) => c.id).sort(),
+    tools: TOOLS.map((t) => ({ name: t.name, readOnly: t.readOnly })).sort((a, b) => a.name.localeCompare(b.name)),
   };
 }
 

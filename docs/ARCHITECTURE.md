@@ -1,216 +1,198 @@
 # Architecture
 
-Three workspaces, one dependency direction, and one rule that decides most of the
-design: **the client cannot write, and the hub owns no data.**
+Three workspaces, one dependency direction, and two rules that decide most of the
+design: **the hub owns nothing, and every client is generated.**
 
 ```
                     ┌──────────────────────────┐
                     │  packages/contract       │   the single source of truth
-                    │  tool schemas · types    │   nothing here imports a sibling
-                    │  auth conventions        │
-                    │  protocol + channels     │
+                    │  tool schemas · errors   │   nothing here imports a sibling
+                    │  protocol · channels     │
+                    │  the client list         │
                     └────────────┬─────────────┘
-                                 │  both sides derive from it
+                                 │  everything derives from it
                  ┌───────────────┴───────────────┐
                  ▼                               ▼
    ┌──────────────────────────┐    ┌──────────────────────────────┐
-   │ packages/clients/axle    │    │ packages/hub                 │
-   │ the Claude Code plugin   │    │ stateless MCP adapter        │
-   │ channel manifest         │    │ Azure App Service            │
-   │ read-only surface        │    │ no database, no state        │
-   └────────────┬─────────────┘    └──────────────┬───────────────┘
-                │  MCP over HTTPS                 │  HTTPS, forwarding
-                │  (Streamable HTTP)              │  the caller's token
-                └────────────────►────────────────┘
-                                                  ▼
-                                  ┌──────────────────────────────┐
-                                  │  Pivotly platform API        │
-                                  │  owns PostgreSQL, USDF       │
-                                  │  schemas, job queue, and     │
-                                  │  every access decision       │
-                                  └──────────────────────────────┘
+   │ packages/clients         │    │ packages/hub                 │
+   │   channels.json (shared) │    │ stateless MCP server         │
+   │   axle/   Claude Code    │◄──►│ Azure App Service            │
+   │   codex/  Codex CLI      │MCP │ two pure functions           │
+   └──────────────────────────┘    └──────────────────────────────┘
 ```
 
-Dependencies point **inward only**. `contract` imports nothing from `hub` or `axle`;
+Dependencies point **inward only**. `contract` imports nothing from `hub` or `clients`;
 if it ever needed to, the thing it needed does not belong in the contract.
 
-## Why the hub has no database
+## What the hub is
 
-An earlier draft of this repository gave the hub its own PostgreSQL connection, schema
-migrations, and `SECURITY DEFINER` functions. That was wrong, and it was removed.
+Two read-only tools — `greeting_hello` and `greeting_day_check` — computed from the
+arguments in the same request. No database. No upstream API. No credentials. No state
+between requests.
 
-The platform API already owns the schema, the tenancy rules, the job queue and the
-audit trail. A second component holding a database credential would mean two places
-that can write the same rows, two places to keep the access rules correct, and two
-places to review when they change. It also gave a component sitting directly behind an
-editor plugin a credential that could mutate tenant data.
+That is not a placeholder for something bigger; it is the whole point. With nothing to
+connect to and nothing to protect, every remaining moving part is **pipeline**: build,
+package, deploy, promote, verify. Anything that fails is a pipeline problem, which is
+what makes this repository a useful reference rather than a demo with a pipeline
+bolted on.
 
-So the hub holds **no connection string, no schema, no migrations and no state**. It is
-a protocol adapter: MCP in, HTTPS out. That decision buys:
+### Why there is no authentication
 
-- **Nothing to migrate on deploy.** A deploy is a process restart. No migration
-  ordering, no backward-compatibility window between schema and code.
-- **Free horizontal scale and painless slot swaps.** Every request is independent, so
-  instances can be added, recycled, or swapped mid-flight with no sticky routing.
-- **One authority on access.** The API authorises every call, so the hub cannot widen
-  anyone's permissions — the worst a hub bug can do is fail a request.
+The hub serves data the caller just sent it. There is no tenant data, no stored record,
+nothing that belongs to anyone. A token would have to be distributed to every client and
+would guard a time-of-day greeting — theatre, and theatre that makes every channel
+harder to test.
 
-What it costs, stated plainly: the hub cannot act without a live caller, so it has no
-background work. Workers call the platform API directly rather than through here.
+Stated plainly so nobody is surprised later: **anyone who can reach the URL can call
+these tools.**
 
-## Token flow
-
-The hub holds **no credential of its own**. It forwards the caller's bearer token
-upstream, verbatim:
+The boundary is enforced rather than remembered. `packages/contract/src/digest.js`
+refuses to build a contract in which any tool is not `readOnly`:
 
 ```
-Claude Code ──Bearer <user token>──► hub ──Bearer <same token>──► platform API
+tool danger_write declares readOnly: false — every tool on this hub must be
+read-only, because the hub serves them without authentication.
 ```
 
-- The API authorises the **end user**, not the hub.
-- There is no ambient service credential to steal from a compromised instance.
-- Every upstream audit row names the real caller.
+No digest means no lock, no CI pass, and no artifact. So the day a tool needs to touch
+real data, the build stops and auth stops being optional — you cannot drift into
+serving a write endpoint anonymously.
 
-`packages/hub/src/auth.js` resolves identity by calling the API's `/v1/me` and believing
-the answer. It caches the result for five seconds — long enough to spare a burst of
-identity calls, short enough that a revoked token stops working in seconds.
+## What a client is
 
-## The client/service split
+The word is overloaded, so: in this repository a **client** is a *host application* that
+speaks MCP — Claude Code, Codex CLI, and whatever comes next. Not a user, and not a kind
+of credential.
 
-The tool surface is divided by **audience**, and this is the platform's main safety rail.
+`packages/contract/src/protocol.js` declares them as data:
 
-| | client surface | service surface |
-| --- | --- | --- |
-| Tools | `greeting_hello`, `greeting_day_check`, `usdf_record_get` | `usdf_record_put`, `job_claim` |
-| Who | the Axle plugin, and anything else a person runs | platform workers with their own credential |
-| Writes | never | yes |
+```js
+{ id: 'axle',  host: 'Claude Code', format: 'mcp-json', configPath: '.mcp.json', plugin: true }
+{ id: 'codex', host: 'Codex CLI',   format: 'toml',     configPath: 'config.toml', plugin: false }
+```
 
-**A client credential cannot cause a write.** Three independent barriers, and any one
-would be sufficient:
+`packages/clients/scripts/generate.js` turns one channel manifest into one config per
+client, in the format that client wants. Adding a third is a data change plus a writer
+function — never a second copy of the channel list.
 
-1. **The contract refuses to build.** `packages/contract/src/digest.js` throws if a
-   client-audience tool is not `readOnly`. No digest, no lock, no CI pass, no artifact.
-2. **The hub never registers it.** `packages/hub/src/mcp.js` builds the MCP server per
-   principal, so a client session's `tools/list` does not mention a service tool at
-   all. It is not described, not schema'd, and not callable — there is nothing for a
-   prompt injection to name. Calling it by name returns *"Tool not found"*.
-3. **The API refuses it.** A client credential is rejected on every write endpoint with
-   `403 forbidden_audience`, regardless of what the hub decided.
+Consequences worth naming:
 
-Only (3) is out of reach of a hub bug, a bad deploy, or a stolen client token — which
-is exactly why it is the platform's job and not the adapter's.
-`packages/hub/scripts/verify-upstream.js` asserts it against a live API, because if
-that barrier were ever missing the split would be cosmetic.
+- **A channel URL exists in exactly one place.** Repointing every client at `dev` is one
+  command.
+- **The configs are generated, so they can be verified.** CI regenerates and compares;
+  a hand-edit fails the build rather than surviving until someone notices.
+- **Clients cannot disagree with each other.** They are the same data through different
+  writers.
+
+## Channels
+
+`local → dev → prerelease → production`, declared in the contract and mapped to URLs in
+`packages/clients/channels.json`. Promotion moves left to right.
+
+| Channel | Trigger | Gate | What it is for |
+| --- | --- | --- | --- |
+| `local` | you | — | your machine |
+| `dev` | every push to `main` | none | always-live, newer than the last release |
+| `prerelease` | a `v*.*.*` tag | verified | what production is about to become |
+| `production` | a slot swap | approval | the stable deployment |
+
+`prerelease` and `production` are **hardened**: the client generator refuses a non-https
+URL for them, and `local` is the only channel allowed plaintext — loopback only.
+
+Each channel carries its own pinned contract digest, advanced by CD only after that
+channel's deploy has been verified. So a pin always trails a proven deploy.
 
 ## The contract digest
 
-One 12-hex string derived from the entire tool surface — names, descriptions, every
-input field's type and requiredness, scopes, audiences, auth conventions, error codes,
-protocol version. It appears in exactly three places, and they must agree:
+One 12-hex string derived from the entire surface — tool names, descriptions, every
+input field's type and requiredness, error codes, endpoint paths, header names, the
+channel list, and the client list. It appears in three places that must agree:
 
 | Where | What it means |
 | --- | --- |
 | `packages/contract/contract.lock.json` | what this repository builds |
-| the hub's `GET /version` | what the deployed endpoint is serving |
-| `packages/clients/axle/channels.json` | what the shipped client was built against |
+| the hub's `GET /version` | what the deployed endpoint serves |
+| `packages/clients/channels.json` | what the clients were generated against |
 
 This is the cascade guard. The failure it exists to catch:
 
 1. the tool surface changes in `packages/contract`
-2. the hub is rebuilt and deployed — internally consistent, so every hub check passes
-3. the Axle channel manifest still pins the **old** digest
+2. the hub is rebuilt and deployed — internally consistent, so every hub-side check passes
+3. the channel manifest still pins the **old** digest
 4. nothing fails anywhere in the pipeline
-5. a user's editor calls a tool whose schema moved, days later and two repositories
-   away from the change that caused it
+5. a user's editor calls a tool whose schema moved, days later and several directories
+   from the change that caused it
 
-`e2e/tiers/tier3-client.js` compares all three and names which pair disagrees. It then
-goes further than the digest and compares the actual served surface field by field — a
-digest match with a differing surface would mean the digest is not covering something
-it should.
+`e2e/tiers/tier3-clients.js` compares all three, names which pair disagrees, and then
+compares the served surface field by field — because a digest match with a differing
+surface would mean the digest is not covering something it should.
+
+Because every client is generated from the same contract, **one digest covers all of
+them**: Axle and Codex cannot disagree about the tool surface without the digest saying
+so.
 
 ## Tools as data, not as code
 
 `packages/contract/src/tools.js` declares tools as plain descriptors:
 
 ```js
-{
-  name: 'greeting_hello',
-  audience: 'client',
-  readOnly: true,
-  input: { hour: { type: 'integer', optional: true, min: 0, max: 23, describe: '…' } },
-}
+{ name: 'greeting_hello', readOnly: true,
+  input: { hour: { type: 'integer', optional: true, min: 0, max: 23, describe: '…' } } }
 ```
 
-`src/zod.js` derives the zod validators from those descriptors. So the schema advertised
-to a client and the schema the server validates against are the same definition, not two
-that agree today.
+`src/zod.js` derives the validators from those descriptors, so the schema advertised to
+a client and the schema the server validates against are the same definition — not two
+that happen to agree today.
 
-Declaring them as data (rather than as live zod objects) is what makes the digest
-possible: a hash over plain JSON is stable, language-neutral and diffable in review.
+Declaring them as data is what makes the digest possible: a hash over plain JSON is
+stable, language-neutral, and diffable in review.
 
-Adding a tool means adding a descriptor and a handler in `packages/hub/src/tools/index.js`.
-The hub asserts the two sets are equal **at boot**, so a tool declared but not
-implemented is a startup failure the deploy gate catches — not a `tools/call` that
-fails for one unlucky user.
+Adding a tool means adding a descriptor and a handler in `packages/hub/src/tools/`. The
+hub asserts the two sets are equal **at boot**, so a tool declared but not implemented is
+a startup failure the deploy gate catches — not a `tools/call` that fails for one user.
 
-## Channels
+## The two probes
 
-`local → dev → prerelease → production`, declared in the contract and mapped to URLs in
-the Axle channel manifest. Promotion is left to right.
+They answer different questions, and the split is load-bearing.
 
-`prerelease` and `production` are **hardened**: `packages/hub/src/config.js` refuses to
-start on either with a plaintext upstream URL, and the client manifest verifier refuses
-a non-https URL for them. Only `local` may be plaintext, and only on loopback.
+`/healthz` — is the process alive? Never checks anything else.
+`/readyz` — can this build serve? Re-verifies that the contract and the handler registry
+still agree and that every declared schema still builds.
 
-## The fake platform API
-
-`packages/hub/scripts/fake-platform-api.js` is a **test double**, not a second
-implementation. It serves the endpoints the contract declares so the hub can be
-exercised end to end with no real API — and critically, the hub uses its **one real HTTP
-client** against it. There is no in-process shortcut and no second code path to drift.
-
-It models faithfully only the behaviours the hub's own logic depends on: identity
-resolution and kind, a write refused for a client credential, tenant-scoped reads
-answering 404 rather than 403, idempotent writes, and an empty queue answering 200.
-
-It models **nothing** about the real access rules, schema registry, durability or
-concurrency. Its job queue is a JavaScript array. Anything depending on those properties
-belongs in `verify-upstream.js`, which the pipeline runs against a deployed API. The
-`_verify.yml` workflow asserts the double is not present in the deployable artifact — a
-test double that ships is a test double that can be reached.
+With no external dependency the two nearly converge, and `/readyz` says so honestly by
+reporting `dependencies: []` rather than implying it probed something. They stay separate
+because App Service points its health check at one and the deploy gate polls it — and
+because the day a dependency appears, there is already a right place to put it.
 
 ## Layout
 
 ```
 packages/contract/          @pivotly/contract — the source of truth
-  src/protocol.js           versions, channels, MCP + upstream endpoint paths
+  src/protocol.js           versions, channels, endpoints, headers, the client list
   src/tools.js              the tool surface, as data
   src/zod.js                descriptors -> zod validators
-  src/auth.js               headers, scope grammar, principal kinds, audiences
   src/errors.js             shared error codes and their HTTP statuses
-  src/digest.js             the contract digest, and the invariants it enforces
+  src/digest.js             the digest, and the read-only invariant it enforces
   contract.lock.json        committed; CI fails on drift
 
-packages/hub/               @pivotly/hub — the cloud MCP adapter
+packages/hub/               @pivotly/hub — the MCP server
   src/index.js              composition root; --http | --stdio | --selftest
   src/http.js               Streamable HTTP MCP + /healthz /readyz /version
-  src/mcp.js                builds an McpServer per principal
-  src/auth.js               identity via the API, then audience and scope
-  src/upstream/client.js    the ONLY path to data
-  src/tools/index.js        the handlers
-  scripts/smoke-remote.js   smoke test for any deployed endpoint
-  scripts/verify-upstream.js  asserts the API behaves as assumed
-  scripts/fake-platform-api.js  the test double
+  src/mcp.js                builds an McpServer per request from the contract
+  src/tools/index.js        the two handlers
+  src/lib/greeting.js       the pure logic everything else is scaffolding around
+  scripts/smoke-remote.js   smoke test for any deployed channel
   testkit/harness.js        boots a real hub over a real socket for tests
 
-packages/clients/axle/      @pivotly/axle — the Claude Code plugin
-  channels.json             channel -> url + pinned contract
-  .mcp.json                 GENERATED from channels.json
-  scripts/autopatch.js      channel selection, drift check, pin sync
-  scripts/verify-manifest.js  what a marketplace install depends on
-  skills/                   when and how Claude should use the tools
+packages/clients/           @pivotly/clients — every client, generated
+  channels.json             SHARED: channel -> url + pinned contract
+  scripts/generate.js       one manifest -> every client config
+  scripts/verify.js         what a marketplace install depends on
+  axle/                     Claude Code plugin (manifest + skills + .mcp.json)
+  codex/                    Codex CLI (config.toml)
 
-e2e/                        the three-tier suite
+e2e/                        contract, protocol and client tiers
 scripts/package-hub.js      builds the deployable App Service artifact
-scripts/verify-versions.js  one check: every version string agrees
+scripts/verify-versions.js  one check: every version and channel pin agrees
+scripts/ci-local.js         runs the offline half of CI on your machine
 ```

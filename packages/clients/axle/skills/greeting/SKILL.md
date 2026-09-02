@@ -17,7 +17,8 @@ Open with a greeting, ask how the day is going, and respond to what you hear.
 
 ## Notes
 
-- `mood` is one of `positive`, `negative`, `neutral`, from keyword matching only.
-  Treat it as a hint, not a judgement — if the text is clearly more nuanced than the
-  bucket, respond to what the user actually said instead of the canned reply.
-- Both tools are read-only: no network, no auth, no stored state.
+- `mood` is one of `positive`, `negative`, `neutral`, from keyword matching only. Treat
+  it as a hint, not a judgement — if the text is clearly more nuanced than the bucket,
+  respond to what the user actually said instead of the canned reply.
+- Both tools are read-only and answer from the server's own logic. They read no files,
+  reach no database, and need no credential.

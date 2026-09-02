@@ -1,8 +1,8 @@
 {
   "name": "@pivotly/hub",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Pivotly MCP hub: a stateless, cloud-hosted MCP adapter in front of the Pivotly platform API. Holds no database, no schema, and no persistent state of its own.",
+  "description": "Pivotly MCP hub: a stateless, anonymous, cloud-hosted MCP server. Two read-only greeting tools, no database, no upstream API, no credentials.",
   "main": "src/index.js",
   "engines": {
     "node": ">=20.18.0"
@@ -13,8 +13,7 @@
     "stdio": "node --env-file-if-exists=../../.env src/index.js --stdio",
     "selftest": "node src/index.js --selftest",
     "test": "node --test",
-    "smoke": "node --env-file-if-exists=../../.env scripts/smoke-remote.js",
-    "verify:upstream": "node --env-file-if-exists=../../.env scripts/verify-upstream.js"
+    "smoke": "node --env-file-if-exists=../../.env scripts/smoke-remote.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -23,7 +22,7 @@
   },
   "exports": {
     "./src/index": "./src/index.js",
-    "./scripts/fake-platform-api": "./scripts/fake-platform-api.js",
+    "./src/mcp": "./src/mcp.js",
     "./scripts/smoke-remote": "./scripts/smoke-remote.js"
   }
 }

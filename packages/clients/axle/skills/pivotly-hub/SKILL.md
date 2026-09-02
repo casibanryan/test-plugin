@@ -1,48 +1,49 @@
 ---
 name: pivotly-hub
-description: Read Pivotly platform data through the Pivotly MCP hub. Use when the user asks about a Pivotly USDF record by id, or when a task needs data that lives in the Pivotly platform rather than in the local repository.
+description: Explains the Pivotly MCP hub connection — which channel this client is pointed at, what the hub can do, and how to read its errors. Use when the user asks which environment they are connected to, why a Pivotly tool failed, or what the hub is.
 ---
 
 # Pivotly hub
 
-The `pivotly-hub` MCP server is a remote, HTTPS connection to the Pivotly platform.
-Its tools read platform data; none of them change anything.
+`pivotly-hub` is a remote MCP server reached over HTTPS. It is **stateless and
+anonymous**: it serves read-only tools computed from the arguments you send it. No
+database, no stored data, no credential.
 
-## What you can do
+## What it can do
 
 | Tool | Use it for |
 | --- | --- |
-| `usdf_record_get` | Fetch one USDF record by id |
-| `greeting_hello` | A connectivity check that needs no platform data |
+| `greeting_hello` | A time-appropriate salutation, plus the "how's your day?" question |
 | `greeting_day_check` | Classify a free-text answer about someone's day |
 
-## What you cannot do
+That is the whole surface. There is no tool here that writes anything, reads stored
+data, or acts on the user's behalf. If a task seems to need one, say so — do not look
+for another route through this server.
 
-**This client is read-only, deliberately.** There is no tool here that writes a
-record, enqueues work, or claims a job — the platform issues this connection a
-`client` credential, and it refuses every write for one. If a task seems to need a
-write, say so and stop; do not look for another route.
+## Which environment am I talking to?
 
-## Reading a record
+The connection is pinned to one **channel**, and they are different deployments:
 
-Pass the record id exactly as the user gave it to `usdf_record_get`. Two answers are
-normal and mean different things:
+| Channel | What it is |
+| --- | --- |
+| `local` | A hub on the user's own machine |
+| `dev` | Redeployed on every push to main — newest, least stable |
+| `prerelease` | A verified release candidate |
+| `production` | The stable deployment |
 
-- `ok: true` — the record, with its `kind`, `schemaVersion` and `payload`.
-- `ok: false, code: "not_found"` — no record with that id **that this account can
-  see**. Records are scoped to a tenant, so this is also the answer for a record that
-  exists in a different one. Report it as "not found for this account" rather than
-  "does not exist", because you cannot tell the two apart and guessing would be wrong.
+If the user asks which one they are on, the answer is in the connection's configured
+URL — a `-dev` or `-prerelease` hostname says so directly, and a bare hostname is
+production.
 
 ## When a call fails
 
 Tool errors carry a `code`. Read it before retrying:
 
-- `unauthenticated` / `token_invalid` — `PIVOTLY_MCP_TOKEN` is missing, expired or
-  revoked. Retrying will not help; tell the user to refresh it.
-- `forbidden_scope` — the account is authenticated but lacks the scope. An access
-  request, not a retry.
-- `forbidden_audience` — a service-only tool was reached for. Do not try again.
-- `unavailable` — the platform API is down or slow. This one is worth retrying once,
-  after a pause.
-- `invalid_input` — the arguments were wrong. Fix them; the message says what.
+- `invalid_input` — the arguments were wrong. The message says which field; fix it and
+  retry. This is the common one.
+- `not_found` — no such tool. The client is likely built against a different contract
+  version than the hub is serving; report it rather than guessing at another name.
+- `unavailable` — the hub cannot serve right now. Worth one retry after a pause.
+- `internal` — a bug on the server. Retrying will not help; report it.
+
+There are no authentication errors, because there is no authentication.

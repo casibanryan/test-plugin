@@ -8,9 +8,13 @@
 'use strict';
 
 const { LOG_LEVELS } = require('./config');
-const { redactToken } = require('@pivotly/contract/auth');
 
 // Keys whose values must never reach a log sink, whatever nesting they appear at.
+//
+// The hub currently handles no credentials at all, so in principle this scrub has
+// nothing to do. It stays because a log call is written once and lives for years: the
+// day something sensitive does pass through here, the default should already be to
+// drop it rather than to print it.
 const SECRET_KEYS = new Set(['token', 'authorization', 'password', 'secret', 'connectionstring', 'databaseurl', 'apikey']);
 
 function scrub(value, depth = 0) {
@@ -19,7 +23,7 @@ function scrub(value, depth = 0) {
   if (typeof value !== 'object') return value;
   const out = {};
   for (const [k, v] of Object.entries(value)) {
-    if (SECRET_KEYS.has(k.toLowerCase())) out[k] = typeof v === 'string' ? redactToken(v) : '[redacted]';
+    if (SECRET_KEYS.has(k.toLowerCase())) out[k] = '[redacted]';
     else out[k] = scrub(v, depth + 1);
   }
   return out;

@@ -2,30 +2,24 @@
 // packages/hub/scripts/smoke-remote.js
 // Smoke test for a DEPLOYED hub endpoint, over the network, as a real client.
 //
-//   node scripts/smoke-remote.js --url=https://hub-prerelease.azurewebsites.net
+//   node scripts/smoke-remote.js --url=https://pivotly-hub-dev.azurewebsites.net
 //   node scripts/smoke-remote.js --url=... --expect-commit=$GITHUB_SHA
-//   node scripts/smoke-remote.js --url=... --json
+//   node scripts/smoke-remote.js --url=... --channel=production --json
 //
-// Run by the pipeline three times: against the container on the build agent, against
-// the pre-release slot before a swap, and against production immediately after. The
-// same script every time, so "it passed in pre-release" and "it passed in production"
-// mean the same thing.
+// The pipeline runs this against every channel it touches: the packaged build on the
+// runner, dev after a push to main, prerelease before a swap, and production after one.
+// The same script every time, so "it passed on prerelease" and "it passed on
+// production" mean the same thing.
 //
 // Deliberately dependency-free — plain fetch, no MCP client library. A smoke test that
-// used the SDK would pass while the raw protocol was subtly wrong, and a client that
-// is not the SDK is exactly what this is meant to catch.
-//
-// The token it uses is a read-only client credential. It never has, and must never be
-// given, a service token: a smoke test that could write would be writing to production
-// on every deploy.
+// used the SDK could pass while the raw protocol was subtly wrong, and a client that is
+// not the SDK is exactly what this is meant to catch.
 
 'use strict';
 
-const { ENDPOINTS, VERSION_PAYLOAD_KEYS, SUPPORTED_MCP_PROTOCOL_VERSIONS } = require('@pivotly/contract/protocol');
-const { CLIENT_TOOL_NAMES, SERVICE_TOOL_NAMES, STATELESS_TOOL_NAMES } = require('@pivotly/contract/tools');
-const { authHeaders } = require('@pivotly/contract/auth');
+const { ENDPOINTS, HEADERS, VERSION_PAYLOAD_KEYS, SUPPORTED_MCP_PROTOCOL_VERSIONS, CONTRACT_VERSION, MCP_PROTOCOL_VERSION, CHANNELS } = require('@pivotly/contract/protocol');
+const { TOOL_NAMES } = require('@pivotly/contract/tools');
 const { contractDigest } = require('@pivotly/contract/digest');
-const { CONTRACT_VERSION, MCP_PROTOCOL_VERSION } = require('@pivotly/contract/protocol');
 
 const arg = (name, fallback = null) => {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -54,16 +48,17 @@ async function main() {
   const base = (arg('url') || process.env.HUB_URL || '').replace(/\/+$/, '');
   if (!base) throw new Error('pass --url=https://... (or set HUB_URL)');
 
-  const token = arg('token') || process.env.SMOKE_TOKEN;
-  if (!token) throw new Error('pass --token=... (or set SMOKE_TOKEN) — a READ-ONLY client token');
-
   const expectCommit = arg('expect-commit');
   const expectDigest = arg('expect-digest') || contractDigest();
+  const expectChannel = arg('channel');
   const timeoutMs = Number(arg('timeout-ms', '15000'));
-  const channel = arg('channel') || process.env.PIVOTLY_CHANNEL || 'ci';
+
+  if (expectChannel && !CHANNELS.includes(expectChannel)) {
+    throw new Error(`--channel must be one of ${CHANNELS.join(', ')}`);
+  }
 
   const c = createChecker();
-  console.log(`\nsmoke: ${base}\n`);
+  console.log(`\nsmoke: ${base}${expectChannel ? ` (expecting channel ${expectChannel})` : ''}\n`);
 
   const get = async (path) => {
     const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
@@ -74,20 +69,25 @@ async function main() {
     } catch {
       /* reported by the caller */
     }
-    return { status: res.status, json, text };
+    return { status: res.status, json, text, headers: res.headers };
   };
 
   let rpcId = 0;
-  const rpc = async (method, params, bearer = token) => {
+  // No Authorization header anywhere in this file: the hub is anonymous by design.
+  // The headers that ARE sent are identity-of-caller metadata the hub logs.
+  const rpc = async (method, params, extraHeaders = {}) => {
     const res = await fetch(`${base}${ENDPOINTS.mcp}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        // Both types: the Streamable HTTP spec allows the server to answer with either
-        // a JSON body or an SSE stream, and a client that sends only one is a client
-        // that breaks the day the server changes its mind.
+        // Both types: Streamable HTTP lets the server answer with a JSON body or an SSE
+        // stream, and a client that sends only one breaks the day the server changes.
         accept: 'application/json, text/event-stream',
-        ...authHeaders({ token: bearer, channel, requestId: `smoke-${++rpcId}` }),
+        [HEADERS.client]: 'smoke',
+        [HEADERS.channel]: expectChannel || 'ci',
+        [HEADERS.clientContract]: CONTRACT_VERSION,
+        [HEADERS.requestId]: `smoke-${++rpcId}`,
+        ...extraHeaders,
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: rpcId, method, params: params ?? {} }),
       signal: AbortSignal.timeout(timeoutMs),
@@ -99,7 +99,7 @@ async function main() {
     } catch {
       /* reported by the caller */
     }
-    return { status: res.status, json, text };
+    return { status: res.status, json, text, headers: res.headers };
   };
 
   // --- probes --------------------------------------------------------------
@@ -107,15 +107,19 @@ async function main() {
   c.equal(`GET ${ENDPOINTS.health} is 200`, health.status, 200);
   c.ok(`${ENDPOINTS.health} reports alive`, health.json?.alive === true, health.text?.slice(0, 200));
 
+  const ready = await get(ENDPOINTS.ready);
+  c.equal(`GET ${ENDPOINTS.ready} is 200`, ready.status, 200);
+  c.ok(`${ENDPOINTS.ready} reports a coherent build`, ready.json?.ready === true, ready.text?.slice(0, 300));
+  c.equal(`${ENDPOINTS.ready} serves the expected tool count`, ready.json?.tools, TOOL_NAMES.length);
+
   const version = await get(ENDPOINTS.version);
   c.equal(`GET ${ENDPOINTS.version} is 200`, version.status, 200);
   for (const key of VERSION_PAYLOAD_KEYS) {
     c.ok(`${ENDPOINTS.version} reports ${key}`, version.json && key in version.json, `payload: ${version.text?.slice(0, 200)}`);
   }
 
-  // The cascade guard. If the deployed hub's contract digest differs from the one this
-  // checkout computes, the client and the server disagree about the tool surface — the
-  // exact failure that otherwise shows up as a broken tool call in someone's editor.
+  // The cascade guard. If the deployed digest differs from the one this checkout
+  // computes, the client and the server disagree about the tool surface.
   c.equal('the deployed contract digest matches this checkout', version.json?.contractDigest, expectDigest);
   c.equal('the deployed contract version matches this checkout', version.json?.contractVersion, CONTRACT_VERSION);
   c.ok(
@@ -124,27 +128,17 @@ async function main() {
     `server speaks ${version.json?.mcpProtocolVersion}, we accept ${SUPPORTED_MCP_PROTOCOL_VERSIONS.join(', ')}`
   );
 
+  // A hub deployed to the wrong channel reports it here. Catching that matters most
+  // right after a slot swap, where the swapped instance could still believe it is
+  // prerelease.
+  if (expectChannel) {
+    c.equal(`the endpoint reports it is on the ${expectChannel} channel`, version.json?.channel, expectChannel);
+  }
+
   // Proves the deploy actually landed, rather than trusting the deploy API's word.
   if (expectCommit) {
     c.equal('the deployed commit is the one we just pushed', version.json?.commit, expectCommit);
   }
-
-  const ready = await get(ENDPOINTS.ready);
-  c.equal(`GET ${ENDPOINTS.ready} is 200`, ready.status, 200);
-  c.ok(`${ENDPOINTS.ready} reports the platform API reachable`, ready.json?.upstream?.reachable === true, ready.text?.slice(0, 300));
-
-  // --- auth ----------------------------------------------------------------
-  const noAuth = await fetch(`${base}${ENDPOINTS.mcp}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  c.equal('an unauthenticated MCP call is refused with 401', noAuth.status, 401);
-  c.ok('the 401 carries a WWW-Authenticate challenge', (noAuth.headers.get('www-authenticate') || '').includes('Bearer'));
-
-  const badToken = await rpc('tools/list', {}, 'definitely-not-a-real-token');
-  c.equal('a bogus token is refused with 401', badToken.status, 401);
 
   // --- protocol ------------------------------------------------------------
   const init = await rpc('initialize', {
@@ -159,50 +153,61 @@ async function main() {
   const list = await rpc('tools/list');
   c.equal('tools/list succeeds', list.status, 200);
   const served = (list.json?.result?.tools || []).map((t) => t.name).sort();
-
-  // A read-only client token must be offered exactly the client surface.
-  c.equal('a client token is served exactly the client tool surface', served, CLIENT_TOOL_NAMES.slice().sort());
-
-  // And must not be offered any service tool. Asserted separately from the equality
-  // above so the failure message says which forbidden tool leaked.
-  const leaked = served.filter((n) => SERVICE_TOOL_NAMES.includes(n));
-  c.ok('no service tool is exposed to a client token', leaked.length === 0, `leaked: ${leaked.join(', ')}`);
+  c.equal('the endpoint serves exactly the contract tool surface', served, TOOL_NAMES.slice().sort());
 
   // Every advertised tool must carry a description and a schema — this is what the
   // model reads, and an empty one is a silent quality regression.
   for (const tool of list.json?.result?.tools || []) {
     c.ok(`${tool.name} advertises a description and an input schema`, Boolean(tool.description) && Boolean(tool.inputSchema));
+    c.equal(`${tool.name} advertises itself as read-only`, tool.annotations?.readOnlyHint, true);
   }
 
-  // --- a real call ---------------------------------------------------------
-  // Only stateless tools: a smoke test must not depend on, or create, tenant data.
-  const canary = STATELESS_TOOL_NAMES.includes('greeting_hello') ? 'greeting_hello' : STATELESS_TOOL_NAMES[0];
-  const call = await rpc('tools/call', { name: canary, arguments: { name: 'smoke', hour: 9 } });
-  c.equal(`tools/call ${canary} succeeds`, call.status, 200);
-  c.ok(`${canary} is not an error result`, call.json?.result?.isError !== true, call.text?.slice(0, 300));
+  // Anonymous access is a deliberate property, so assert it rather than relying on it.
+  // If a credential check is ever added, this failing is the intended alarm.
+  const bare = await fetch(`${base}${ENDPOINTS.mcp}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 999, method: 'tools/list', params: {} }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  c.equal('a request with no client headers at all still works (the hub is anonymous)', bare.status, 200);
+
+  // --- real calls ----------------------------------------------------------
+  const hello = await rpc('tools/call', { name: 'greeting_hello', arguments: { name: 'smoke', hour: 9 } });
+  c.equal('tools/call greeting_hello succeeds', hello.status, 200);
+  c.ok('greeting_hello is not an error result', hello.json?.result?.isError !== true, hello.text?.slice(0, 300));
 
   let payload = null;
   try {
-    payload = JSON.parse(call.json?.result?.content?.[0]?.text || 'null');
+    payload = JSON.parse(hello.json?.result?.content?.[0]?.text || 'null');
   } catch {
     /* reported below */
   }
-  c.ok(`${canary} returns a JSON payload`, payload && payload.ok === true, call.text?.slice(0, 300));
-  c.ok(`${canary} returns the expected greeting`, /^Good morning, smoke!/.test(payload?.message || ''), payload?.message);
+  c.ok('greeting_hello returns a JSON payload', payload && payload.ok === true, hello.text?.slice(0, 300));
+  c.ok('greeting_hello returns the expected greeting', /^Good morning, smoke!/.test(payload?.message || ''), payload?.message);
 
-  // A write must be refused for this token — not merely absent from tools/list, but
-  // actually refused if called by name.
-  const write = await rpc('tools/call', { name: 'usdf_record_put', arguments: { kind: 'greeting.session', payload: {} } });
-  const writeText = write.json?.result?.content?.[0]?.text || '';
-  c.ok(
-    'a client token cannot call a service write tool',
-    write.json?.result?.isError === true || write.json?.error != null,
-    `the write was NOT refused: ${writeText.slice(0, 200)}`
-  );
+  const dayCheck = await rpc('tools/call', { name: 'greeting_day_check', arguments: { answer: 'not great' } });
+  let mood = null;
+  try {
+    mood = JSON.parse(dayCheck.json?.result?.content?.[0]?.text || 'null')?.mood;
+  } catch {
+    /* reported below */
+  }
+  c.equal('greeting_day_check reads a negation as negative', mood, 'negative');
 
   // Input validation must happen server-side, from the contract's schema.
-  const bad = await rpc('tools/call', { name: canary, arguments: { hour: 99 } });
+  const bad = await rpc('tools/call', { name: 'greeting_hello', arguments: { hour: 99 } });
   c.ok('the server rejects input that violates the contract schema', bad.json?.result?.isError === true || bad.json?.error != null, bad.text?.slice(0, 200));
+
+  const unknown = await rpc('tools/call', { name: 'no_such_tool', arguments: {} });
+  c.ok('an unknown tool is refused', unknown.json?.result?.isError === true || unknown.json?.error != null, unknown.text?.slice(0, 200));
+
+  // --- transport details ---------------------------------------------------
+  const correlated = await rpc('tools/list', {}, { [HEADERS.requestId]: 'smoke-correlation-id' });
+  c.equal('the request id is echoed back for correlation', correlated.headers.get(HEADERS.requestId), 'smoke-correlation-id');
+
+  const notFound = await get('/definitely-not-a-route');
+  c.equal('an unknown route is 404', notFound.status, 404);
 
   // --- summary -------------------------------------------------------------
   const failures = c.failures();

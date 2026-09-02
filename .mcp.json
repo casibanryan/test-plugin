@@ -1,13 +1,13 @@
 {
-  "_comment": "Project-scoped MCP config for working ON this repo — not the config the Axle plugin ships. That one is generated at packages/clients/axle/.mcp.json. This points at a hub running on your own machine, so start both halves first:  npm run dev:api  (the fake platform API, port 8790)  and  npm run dev:hub  (the hub, port 8787). Until they are up, this server will simply fail to connect.",
+  "_comment": "Project-scoped MCP config for working ON this repo — NOT the config the Axle plugin ships. That one is generated at packages/clients/axle/.mcp.json by `npm run clients:generate`. This one points at a hub on your own machine: run `npm run dev:hub` and reload. No token: the hub is anonymous.",
   "mcpServers": {
     "pivotly-hub-local": {
       "type": "http",
       "url": "http://127.0.0.1:8787/mcp",
       "headers": {
-        "authorization": "Bearer ${PIVOTLY_MCP_TOKEN}",
+        "x-pivotly-client": "repo-dev",
         "x-pivotly-channel": "local",
-        "x-pivotly-contract": "0.2.0"
+        "x-pivotly-contract": "0.3.0"
       }
     }
   }

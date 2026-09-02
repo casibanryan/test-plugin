@@ -33,20 +33,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
           cache: npm
-
       - run: npm ci
 
-      # The cascade guard's first line: the committed digest must match what the
-      # source computes. A tool surface cannot change without a reviewed lock diff.
+      # The cascade guard's first line: the committed digest must match what the source
+      # computes. A tool surface cannot change without a reviewed lock diff.
       - name: The contract lock matches the source
         run: npm run contract:verify
 
-      - name: Every version in the repo agrees
+      # Covers every package version, every plugin manifest, and every CHANNEL PIN —
+      # so a partial resync (one channel updated, three forgotten) fails here.
+      - name: Every version and channel pin agrees
         run: npm run versions:verify ${{ inputs.tag && format('-- --tag={0}', inputs.tag) || '' }}
 
       - name: Contract self-tests
@@ -65,16 +65,14 @@ jobs:
         node: ['20', '22']
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-
       - run: npm ci
 
-      # The hub suite boots a real HTTP server against the fake platform API on
-      # ephemeral ports — no service containers, no database, nothing to wait for.
+      # The hub suite boots a real HTTP server on ephemeral ports. With no database and
+      # no upstream API there is nothing to stand up first and nothing to wait for.
       - name: All workspace tests
         run: npm test
 
@@ -82,53 +80,54 @@ jobs:
         run: npm run hub:selftest
 
   # ---------------------------------------------------------------------------
-  client:
-    name: Client manifest and channels
+  # Every declared client, not just the plugin. The checks iterate the contract's
+  # CLIENTS list, so adding a client automatically brings it under them.
+  # ---------------------------------------------------------------------------
+  clients:
+    name: Client configs and channels
     runs-on: ubuntu-latest
     needs: contract
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
           cache: npm
-
       - run: npm ci
 
-      - name: Manifests validate against the plugin schema
+      - name: The plugin manifest validates against the plugin schema
         run: npx --yes @anthropic-ai/claude-code plugin validate ./packages/clients/axle
 
-      - name: Axle manifests, channels, and skills
-        run: npm run axle:verify
+      - name: Client configs, channel pins, and skills
+        run: npm run clients:verify
 
       # Read-only: it must not repair the drift it is checking, or a pull request could
-      # pass by rewriting the evidence. Unreachable channels are tolerated, so a fork
+      # pass by rewriting the evidence. An unreachable channel is tolerated, so a fork
       # with no route to Azure still gets a meaningful result.
-      - name: The client channel manifest is in sync
-        run: npm run axle:autopatch -- --check
+      - name: Every client config is in sync with the channel manifest
+        run: npm run clients:check -- --timeout-ms=5000
 
       - name: A marketplace install would get a working plugin
         run: |
           # A marketplace install copies the repo as-is: no npm install, no build. This
-          # reproduces that and asserts the plugin's own files stand on their own.
+          # reproduces that and asserts the plugin's files stand on their own.
           mkdir -p /tmp/installed
           git archive HEAD | tar -x -C /tmp/installed
           cd /tmp/installed/packages/clients/axle
-          test -f .claude-plugin/plugin.json || { echo '::error::plugin.json is missing from a clean export'; exit 1; }
-          test -f .mcp.json || { echo '::error::.mcp.json is missing from a clean export'; exit 1; }
-          test -d skills || { echo '::error::skills/ is missing from a clean export'; exit 1; }
+          for f in .claude-plugin/plugin.json .mcp.json skills; do
+            test -e "$f" || { echo "::error::$f is missing from a clean export"; exit 1; }
+          done
           node -e "
             const fs = require('fs');
-            const mcp = JSON.parse(fs.readFileSync('.mcp.json', 'utf8'));
-            const server = Object.values(mcp.mcpServers)[0];
+            const raw = fs.readFileSync('.mcp.json', 'utf8');
+            const server = Object.values(JSON.parse(raw).mcpServers)[0];
             if (server.type !== 'http') { console.error('FAIL: not an http server'); process.exit(1); }
             if (!/^https:\/\//.test(server.url)) { console.error('FAIL: shipped url is not https: ' + server.url); process.exit(1); }
-            const auth = server.headers.authorization || '';
-            if (!/^Bearer \\\$\{[A-Z_][A-Z0-9_]*\}$/.test(auth)) {
-              console.error('FAIL: a literal credential may have been committed: ' + auth); process.exit(1);
-            }
-            console.log('ok  a clean install points at ' + server.url);
+            // The hub is anonymous, so a shipped config must carry no credential at all.
+            if (/authorization/i.test(raw)) { console.error('FAIL: an Authorization header was shipped'); process.exit(1); }
+            const suspicious = raw.match(/\b[A-Za-z0-9_-]{32,}\b/g) || [];
+            if (suspicious.length) { console.error('FAIL: something token-shaped was shipped: ' + suspicious[0]); process.exit(1); }
+            console.log('ok  a clean install points at ' + server.url + ', with no credential');
           "
 
   # ---------------------------------------------------------------------------
@@ -142,18 +141,16 @@ jobs:
     needs: contract
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
           cache: npm
-
       - run: npm ci
 
       # The hub is a Node process on App Service with no OS layer of its own, so the
-      # dependency tree is the attack surface worth scanning. Production dependencies
-      # only: a devDependency advisory is not a deployed risk and would train everyone
-      # to ignore this step.
+      # dependency tree is the surface worth scanning. Production dependencies only: a
+      # devDependency advisory is not a deployed risk and failing on one would train
+      # everyone to ignore this step.
       - name: Vulnerability scan of the production dependency tree
         run: |
           set -o pipefail
@@ -167,32 +164,21 @@ jobs:
           BUILD_COMMIT: ${{ github.sha }}
         run: npm run package:hub
 
-      - name: The test double is not in the artifact
+      - name: Only the hub is in the artifact
         run: |
-          # A fake platform API shipped to production is a fake platform API that could
-          # be reached in production.
-          if [ -e dist/hub/packages/hub/scripts/fake-platform-api.js ]; then
-            echo '::error::fake-platform-api.js was packaged into the deployable artifact'
-            exit 1
-          fi
-          if [ -e dist/hub/packages/hub/test ] || [ -e dist/hub/packages/hub/testkit ]; then
-            echo '::error::test code was packaged into the deployable artifact'
-            exit 1
-          fi
-          if [ -e dist/hub/packages/clients ]; then
-            echo '::error::the client package was packaged into the hub artifact'
-            exit 1
-          fi
-          echo 'ok  the artifact contains only what the hub needs to run'
+          for path in packages/hub/test packages/hub/testkit packages/clients e2e; do
+            if [ -e "dist/hub/$path" ]; then
+              echo "::error::$path was packaged into the deployable artifact"
+              exit 1
+            fi
+          done
+          echo 'ok  the artifact contains only the hub and its contract'
 
       - name: The artifact boots and self-tests
         working-directory: dist/hub
-        env:
-          PIVOTLY_API_URL: https://api.invalid.example
         run: |
-          # --selftest makes no upstream call, so this proves the packaged tree can
-          # load the contract and that its declared and implemented tools agree —
-          # with nothing reachable.
+          # --selftest needs no configuration at all, so this proves the packaged tree
+          # can load the contract and that its declared and implemented tools agree.
           node packages/hub/src/index.js --selftest | tee selftest.json
           node -e "
             const out = JSON.parse(require('fs').readFileSync('selftest.json', 'utf8'));
@@ -215,23 +201,20 @@ jobs:
           include-hidden-files: false
 
   # ---------------------------------------------------------------------------
-  # The whole stack, locally: fake platform API + hub + all three tiers. Uses the
-  # identical tier code that runs against a deployed channel, so a tier that only
-  # works in CI is not possible.
+  # All three tiers against a hub the suite starts itself. Uses the identical tier code
+  # that runs against a deployed channel, so a tier that only works in CI is impossible.
   # ---------------------------------------------------------------------------
   e2e-local:
-    name: End-to-end (local stack, all tiers)
+    name: End-to-end (local hub, all tiers)
     runs-on: ubuntu-latest
-    needs: [unit, client]
+    needs: [unit, clients]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
           cache: npm
-
       - run: npm ci
 
-      - name: All three tiers against a local stack
+      - name: All three tiers against a hub started by the suite
         run: npm run e2e
