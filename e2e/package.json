@@ -4,10 +4,10 @@
   "private": true,
   "description": "Multi-tier end-to-end suite: platform invariants, remote MCP protocol behaviour, and client/channel compatibility against a live hub endpoint.",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.18.0"
   },
   "scripts": {
-    "e2e": "node run.js",
+    "e2e": "node --env-file-if-exists=../.env run.js",
     "test": "node run.js --tiers=3"
   },
   "dependencies": {

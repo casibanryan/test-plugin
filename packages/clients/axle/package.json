@@ -4,7 +4,7 @@
   "private": true,
   "description": "Axle: the Claude client for the Pivotly hub. Ships as a Claude Code plugin and owns channel selection plus manifest autopatch.",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.18.0"
   },
   "scripts": {
     "test": "node --test",

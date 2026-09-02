@@ -5,16 +5,16 @@
   "description": "Pivotly MCP hub: a stateless, cloud-hosted MCP adapter in front of the Pivotly platform API. Holds no database, no schema, and no persistent state of its own.",
   "main": "src/index.js",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.18.0"
   },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node src/index.js --http",
-    "stdio": "node src/index.js --stdio",
+    "dev": "node --env-file-if-exists=../../.env src/index.js --http",
+    "stdio": "node --env-file-if-exists=../../.env src/index.js --stdio",
     "selftest": "node src/index.js --selftest",
     "test": "node --test",
-    "smoke": "node scripts/smoke-remote.js",
-    "verify:upstream": "node scripts/verify-upstream.js"
+    "smoke": "node --env-file-if-exists=../../.env scripts/smoke-remote.js",
+    "verify:upstream": "node --env-file-if-exists=../../.env scripts/verify-upstream.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

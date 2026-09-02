@@ -4,7 +4,7 @@
   "private": true,
   "description": "Pivotly AI monorepo: contract (source of truth), hub (cloud MCP server), and the Axle Claude client.",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.18.0"
   },
   "workspaces": [
     "packages/contract",
@@ -22,12 +22,12 @@
     "versions:verify": "node scripts/verify-versions.js",
     "dev:hub": "npm run dev -w @pivotly/hub",
     "hub:selftest": "npm run selftest -w @pivotly/hub",
-    "smoke": "node packages/hub/scripts/smoke-remote.js",
+    "smoke": "node --env-file-if-exists=.env packages/hub/scripts/smoke-remote.js",
     "e2e": "npm run e2e -w @pivotly/e2e",
     "axle:autopatch": "npm run autopatch -w @pivotly/axle",
     "axle:verify": "npm run verify -w @pivotly/axle",
     "verify:upstream": "npm run verify:upstream -w @pivotly/hub",
-    "dev:api": "node packages/hub/scripts/fake-platform-api.js --port=8790",
+    "dev:api": "node --env-file-if-exists=.env packages/hub/scripts/fake-platform-api.js --port=8790",
     "package:hub": "node scripts/package-hub.js",
     "verify:all": "npm run contract:verify && npm run versions:verify && npm test && npm run axle:verify",
     "ci:local": "node scripts/ci-local.js"
