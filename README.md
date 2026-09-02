@@ -35,9 +35,19 @@ the API authorises the end user rather than the hub. A deploy is a process resta
 
 ```sh
 npm ci
-npm run dev:api     # a fake platform API on 8790 — a test double, not the platform
-npm run dev:hub     # the hub on 8787
+cp .env.example .env   # required — the hub refuses to start without PIVOTLY_API_URL
 ```
+
+Then two terminals — the hub needs something to talk to, because it holds no data itself:
+
+```sh
+npm run dev:api     # terminal 1 — a fake platform API on 8790 (a test double)
+npm run dev:hub     # terminal 2 — the hub on 8787
+```
+
+`.env` is read by Node's own `--env-file-if-exists`, so there's no `dotenv` and no import
+to add. Only the local-facing scripts read it; `npm start` deliberately does not, so a
+stray `.env` can never override a deployed channel's Azure App Settings.
 
 Then speak MCP to it. `dev-token` is a **client** credential; `worker-token` is a
 service one:
@@ -65,15 +75,20 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 ## Verify it
 
 ```sh
+npm run ci:local     # the whole offline pipeline — every check CI runs, same job names
 npm run verify:all   # contract lock, version coherence, all tests, client manifests
 npm run e2e          # all three tiers against a stack it boots itself
 ```
+
+Start with `npm run ci:local`. It runs the same steps as
+[`_verify.yml`](.github/workflows/_verify.yml), reports per job, and a red job here is
+the job that would be red in CI. `--job=client` and `--skip=artifact` narrow it down.
 
 `npm run e2e` needs nothing running — with no `--hub-url` it stands up the fake API and
 the hub on ephemeral ports and runs the identical tier code that runs against
 production.
 
-Current state: 22 contract self-tests, 49 hub tests over a real socket, 22 client tests,
+Current state: 23 contract self-tests, 49 hub tests over a real socket, 22 client tests,
 70 manifest checks, 34 remote smoke checks, 40 upstream assumptions, 30 e2e checks
 across three tiers.
 

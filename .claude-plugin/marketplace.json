@@ -1,8 +1,8 @@
 {
-  "name": "pivotly",
+  "name": "Test Plugin",
   "description": "Pivotly Claude clients. Installing from here gets you the Axle plugin, which connects Claude Code to the Pivotly MCP hub.",
   "owner": {
-    "name": "Pivotly",
+    "name": "Resty",
     "url": "https://github.com/pivotly/pivotly-ai"
   },
   "plugins": [

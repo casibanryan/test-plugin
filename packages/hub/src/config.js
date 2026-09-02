@@ -24,7 +24,13 @@ function loadConfig(env = process.env) {
 
   const baseUrl = env.PIVOTLY_API_URL || '';
   if (!baseUrl) {
-    throw new Error('PIVOTLY_API_URL is required — the hub holds no data and cannot serve anything without the platform API');
+    // Say how to fix it, not just what is wrong. This is the first error anyone hits
+    // on a fresh clone, and "required" alone leaves them guessing at a variable name.
+    throw new Error(
+      'PIVOTLY_API_URL is required — the hub holds no data and cannot serve anything without the platform API.\n' +
+        '       For local development:  cp .env.example .env    (then npm run dev:api, npm run dev:hub)\n' +
+        '       For a deployed channel: set it as an Azure App Setting (see docs/PIPELINE.md).'
+    );
   }
 
   let parsed;
