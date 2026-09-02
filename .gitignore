@@ -2,7 +2,11 @@ node_modules/
 npm-debug.log*
 .env
 .env.local
+.env.*.local
 coverage/
 *.tgz
 .DS_Store
 .vscode/
+dist/
+.pivotly-tmp/
+*.trivy.json

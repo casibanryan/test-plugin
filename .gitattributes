@@ -1,0 +1,13 @@
+# Default: let git normalise text in the repository and check it out natively.
+* text=auto
+
+# contract.lock.json is compared BYTE FOR BYTE against `JSON.stringify(..., 2) + '\n'`
+# by `npm run contract:verify`. Checked out with CRLF on Windows it would never match,
+# so the lock is pinned to LF and the check means the same thing on every platform.
+packages/contract/contract.lock.json text eol=lf
+
+# The generated client manifest is likewise regenerated and compared exactly.
+packages/clients/axle/.mcp.json text eol=lf
+
+# Shell scripts are executed by Linux (App Service, CI runners); CRLF breaks a shebang.
+*.sh text eol=lf

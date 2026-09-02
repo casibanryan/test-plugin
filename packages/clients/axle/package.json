@@ -1,0 +1,19 @@
+{
+  "name": "@pivotly/axle",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Axle: the Claude client for the Pivotly hub. Ships as a Claude Code plugin and owns channel selection plus manifest autopatch.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "verify": "node scripts/verify-manifest.js",
+    "autopatch": "node scripts/autopatch.js",
+    "autopatch:check": "node scripts/autopatch.js --check",
+    "channel": "node scripts/autopatch.js --print"
+  },
+  "dependencies": {
+    "@pivotly/contract": "*"
+  }
+}

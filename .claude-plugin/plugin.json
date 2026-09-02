@@ -1,7 +1,7 @@
 {
   "name": "greeting",
   "version": "0.1.0",
-  "description": "A minimal greeting plugin: says hello with a time-appropriate salutation, asks how your day is going, and responds to the answer. Built as a reference for the plugin + Docker + GitHub Actions pipeline.",
+  "description": "A minimal greeting plugin: says hello with a time-appropriate salutation, asks how your day is going, and responds to the answer. Built as a reference for the plugin + GitHub Actions CI/CD pipeline.",
   "author": {
     "name": "Pivotly"
   },

@@ -1,0 +1,237 @@
+# .github/workflows/_verify.yml
+#
+# Everything that can be proven without a deployed environment, as a reusable workflow.
+#
+# It exists so CI and CD run the SAME checks rather than two drifting copies. CD cannot
+# simply trust that CI ran: a tag is permanent and installable, and it may point at a
+# commit whose CI run predates a change to the workflow itself. So CD calls this again.
+
+name: verify
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node version for the single-version jobs.
+        type: string
+        default: '22'
+      tag:
+        description: Release tag being verified, if any. When set, the tag must match the repo version.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Runs first and alone, because everything else derives from the contract. If the
+  # tool surface and its lock disagree, no other result means anything.
+  # ---------------------------------------------------------------------------
+  contract:
+    name: Contract and versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      # The cascade guard's first line: the committed digest must match what the
+      # source computes. A tool surface cannot change without a reviewed lock diff.
+      - name: The contract lock matches the source
+        run: npm run contract:verify
+
+      - name: Every version in the repo agrees
+        run: npm run versions:verify ${{ inputs.tag && format('-- --tag={0}', inputs.tag) || '' }}
+
+      - name: Contract self-tests
+        run: npm run test:contract
+
+  # ---------------------------------------------------------------------------
+  unit:
+    name: Unit and integration (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    needs: contract
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the declared engines floor and 22 is what the deployed app runs. Both,
+        # because a deploy that only ever ran on 22 would hide a floor violation.
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      # The hub suite boots a real HTTP server against the fake platform API on
+      # ephemeral ports — no service containers, no database, nothing to wait for.
+      - name: All workspace tests
+        run: npm test
+
+      - name: The hub self-test reports a coherent build
+        run: npm run hub:selftest
+
+  # ---------------------------------------------------------------------------
+  client:
+    name: Client manifest and channels
+    runs-on: ubuntu-latest
+    needs: contract
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Manifests validate against the plugin schema
+        run: npx --yes @anthropic-ai/claude-code plugin validate ./packages/clients/axle
+
+      - name: Axle manifests, channels, and skills
+        run: npm run axle:verify
+
+      # Read-only: it must not repair the drift it is checking, or a pull request could
+      # pass by rewriting the evidence. Unreachable channels are tolerated, so a fork
+      # with no route to Azure still gets a meaningful result.
+      - name: The client channel manifest is in sync
+        run: npm run axle:autopatch -- --check
+
+      - name: A marketplace install would get a working plugin
+        run: |
+          # A marketplace install copies the repo as-is: no npm install, no build. This
+          # reproduces that and asserts the plugin's own files stand on their own.
+          mkdir -p /tmp/installed
+          git archive HEAD | tar -x -C /tmp/installed
+          cd /tmp/installed/packages/clients/axle
+          test -f .claude-plugin/plugin.json || { echo '::error::plugin.json is missing from a clean export'; exit 1; }
+          test -f .mcp.json || { echo '::error::.mcp.json is missing from a clean export'; exit 1; }
+          test -d skills || { echo '::error::skills/ is missing from a clean export'; exit 1; }
+          node -e "
+            const fs = require('fs');
+            const mcp = JSON.parse(fs.readFileSync('.mcp.json', 'utf8'));
+            const server = Object.values(mcp.mcpServers)[0];
+            if (server.type !== 'http') { console.error('FAIL: not an http server'); process.exit(1); }
+            if (!/^https:\/\//.test(server.url)) { console.error('FAIL: shipped url is not https: ' + server.url); process.exit(1); }
+            const auth = server.headers.authorization || '';
+            if (!/^Bearer \\\$\{[A-Z_][A-Z0-9_]*\}$/.test(auth)) {
+              console.error('FAIL: a literal credential may have been committed: ' + auth); process.exit(1);
+            }
+            console.log('ok  a clean install points at ' + server.url);
+          "
+
+  # ---------------------------------------------------------------------------
+  # The deployable artifact, built and then tested FROM THE ARTIFACT — not from the
+  # checkout. A build that passes in the repo and fails once packaged is a class of
+  # failure that only shows up in the deployed channel otherwise.
+  # ---------------------------------------------------------------------------
+  artifact:
+    name: Package and scan the deployable artifact
+    runs-on: ubuntu-latest
+    needs: contract
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      # The hub is a Node process on App Service with no OS layer of its own, so the
+      # dependency tree is the attack surface worth scanning. Production dependencies
+      # only: a devDependency advisory is not a deployed risk and would train everyone
+      # to ignore this step.
+      - name: Vulnerability scan of the production dependency tree
+        run: |
+          set -o pipefail
+          npm audit --omit=dev --audit-level=high --workspace @pivotly/hub --include-workspace-root | tee audit.txt || {
+            echo '::error::npm audit found a high or critical advisory in a production dependency of the hub'
+            exit 1
+          }
+
+      - name: Build the artifact
+        env:
+          BUILD_COMMIT: ${{ github.sha }}
+        run: npm run package:hub
+
+      - name: The test double is not in the artifact
+        run: |
+          # A fake platform API shipped to production is a fake platform API that could
+          # be reached in production.
+          if [ -e dist/hub/packages/hub/scripts/fake-platform-api.js ]; then
+            echo '::error::fake-platform-api.js was packaged into the deployable artifact'
+            exit 1
+          fi
+          if [ -e dist/hub/packages/hub/test ] || [ -e dist/hub/packages/hub/testkit ]; then
+            echo '::error::test code was packaged into the deployable artifact'
+            exit 1
+          fi
+          if [ -e dist/hub/packages/clients ]; then
+            echo '::error::the client package was packaged into the hub artifact'
+            exit 1
+          fi
+          echo 'ok  the artifact contains only what the hub needs to run'
+
+      - name: The artifact boots and self-tests
+        working-directory: dist/hub
+        env:
+          PIVOTLY_API_URL: https://api.invalid.example
+        run: |
+          # --selftest makes no upstream call, so this proves the packaged tree can
+          # load the contract and that its declared and implemented tools agree —
+          # with nothing reachable.
+          node packages/hub/src/index.js --selftest | tee selftest.json
+          node -e "
+            const out = JSON.parse(require('fs').readFileSync('selftest.json', 'utf8'));
+            const artifact = JSON.parse(require('fs').readFileSync('artifact.json', 'utf8'));
+            if (!out.ok) { console.error('FAIL: selftest reported not ok'); process.exit(1); }
+            if (out.contractDigest !== artifact.contractDigest) {
+              console.error('FAIL: the running code and the artifact manifest disagree about the contract');
+              process.exit(1);
+            }
+            console.log('ok  artifact ' + artifact.artifactDigest + ' serves contract ' + artifact.contractDigest);
+          "
+
+      # Uploaded so CD deploys the exact bytes that were scanned and self-tested here,
+      # rather than rebuilding and hoping the two are identical.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-${{ github.sha }}
+          path: dist/hub
+          retention-days: 14
+          include-hidden-files: false
+
+  # ---------------------------------------------------------------------------
+  # The whole stack, locally: fake platform API + hub + all three tiers. Uses the
+  # identical tier code that runs against a deployed channel, so a tier that only
+  # works in CI is not possible.
+  # ---------------------------------------------------------------------------
+  e2e-local:
+    name: End-to-end (local stack, all tiers)
+    runs-on: ubuntu-latest
+    needs: [unit, client]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: All three tiers against a local stack
+        run: npm run e2e

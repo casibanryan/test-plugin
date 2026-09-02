@@ -1,0 +1,29 @@
+{
+  "name": "@pivotly/hub",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Pivotly MCP hub: a stateless, cloud-hosted MCP adapter in front of the Pivotly platform API. Holds no database, no schema, and no persistent state of its own.",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js --http",
+    "stdio": "node src/index.js --stdio",
+    "selftest": "node src/index.js --selftest",
+    "test": "node --test",
+    "smoke": "node scripts/smoke-remote.js",
+    "verify:upstream": "node scripts/verify-upstream.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@pivotly/contract": "*",
+    "zod": "^3.25.76"
+  },
+  "exports": {
+    "./src/index": "./src/index.js",
+    "./scripts/fake-platform-api": "./scripts/fake-platform-api.js",
+    "./scripts/smoke-remote": "./scripts/smoke-remote.js"
+  }
+}

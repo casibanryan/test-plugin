@@ -1,89 +1,405 @@
+# .github/workflows/cd.yml
+#
+# Deploys the hub to Azure App Service and then resynchronises the client.
+#
+# The shape of the pipeline, and why each step is where it is:
+#
+#   verify              re-run every offline check. A tag is permanent and installable,
+#                       and may point at a commit whose CI run predates a change to the
+#                       workflow, so CD never trusts that CI already passed.
+#   deploy-prerelease   push the artifact to the App Service STAGING SLOT. Nothing in
+#                       production has changed yet; the slot is a full running copy.
+#   verify-prerelease   drive all three tiers against the slot's real URL. This is the
+#                       gate: a build that cannot serve a real client never gets
+#                       promoted, and the blast radius of a failure here is zero.
+#   promote             swap the slot into production. A swap, not a redeploy: the
+#                       instances that just passed their checks are the instances that
+#                       start taking production traffic, warmed up, and the previous
+#                       production build is still in the slot behind them.
+#   verify-production   the same tier 2 and tier 3 checks against production. If these
+#                       fail, rollback is another swap — seconds, not a rebuild.
+#   sync-client         only now advance the Axle channel pin to the digest production
+#                       is actually serving, and publish the release. The client's pin
+#                       therefore always trails a verified deploy, never leads it.
+#
+# Required secrets and variables are listed in docs/PIPELINE.md.
+
 name: CD
 
-# Publishes the container image to GitHub Container Registry (ghcr.io).
-#   push to main   -> :main and :sha-<commit>
-#   tag v1.2.3     -> :1.2.3, :1.2, :1 and :latest
 on:
   push:
-    branches: [main]
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      skip-promotion:
+        description: Deploy and verify pre-release, but do not swap into production.
+        type: boolean
+        default: false
 
+# Never cancel a deploy in flight: cancelling between a slot deploy and a swap leaves
+# the two halves inconsistent with nothing to say so.
 concurrency:
-  group: cd-${{ github.ref }}
+  group: cd-production
   cancel-in-progress: false
 
 permissions:
   contents: read
-  packages: write
-
-env:
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  publish:
-    name: Build and publish image
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify
+    uses: ./.github/workflows/_verify.yml
+    with:
+      tag: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+  # ---------------------------------------------------------------------------
+  deploy-prerelease:
+    name: Deploy to the pre-release slot
     runs-on: ubuntu-latest
+    needs: verify
+    environment:
+      name: prerelease
+      url: ${{ vars.HUB_PRERELEASE_URL }}
+    permissions:
+      contents: read
+      id-token: write # OIDC federated login to Azure — no stored client secret
+    steps:
+      # The artifact built and scanned by verify, byte for byte. Rebuilding here would
+      # mean deploying something that was never the thing that passed.
+      - uses: actions/download-artifact@v4
+        with:
+          name: hub-${{ github.sha }}
+          path: dist/hub
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # App Settings are set BEFORE the deploy, so the new code never starts against
+      # the previous configuration. BUILD_COMMIT is what /version reports, and is how
+      # the next step proves this deploy actually landed.
+      - name: Configure the slot
+        run: |
+          az webapp config appsettings set \
+            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
+            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
+            --slot prerelease \
+            --settings \
+              HUB_CHANNEL=prerelease \
+              HUB_MODE=http \
+              HUB_LOG_LEVEL=info \
+              PIVOTLY_API_URL='${{ vars.PIVOTLY_API_URL }}' \
+              BUILD_COMMIT='${{ github.sha }}' \
+              BUILD_TIMESTAMP='${{ github.event.repository.updated_at }}' \
+              WEBSITES_PORT=8787 \
+              SCM_DO_BUILD_DURING_DEPLOYMENT=false \
+            --output none
+
+          # startup.sh comes from the artifact, so the start command is versioned with
+          # the code it starts rather than living in a portal field nobody diffs.
+          az webapp config set \
+            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
+            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
+            --slot prerelease \
+            --startup-file 'startup.sh' \
+            --output none
+
+      - name: Deploy the artifact to the slot
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          slot-name: prerelease
+          package: dist/hub
+
+      # Do not trust the deploy API's success. Poll until the slot reports the commit
+      # we just pushed AND says it is ready — an instance can be up, serving the
+      # previous build, and answer 200 the whole time.
+      - name: Wait for the slot to serve this commit
+        env:
+          HUB_URL: ${{ vars.HUB_PRERELEASE_URL }}
+        run: |
+          set -u
+          for attempt in $(seq 1 40); do
+            commit=$(curl -fsS --max-time 10 "$HUB_URL/version" | node -e "
+              let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).commit||'')}catch{process.stdout.write('')}})
+            " || true)
+            ready=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$HUB_URL/readyz" || true)
+
+            if [ "$commit" = "${{ github.sha }}" ] && [ "$ready" = "200" ]; then
+              echo "ok  the slot serves ${{ github.sha }} and reports ready"
+              exit 0
+            fi
+            echo "attempt $attempt/40: commit=${commit:-none} readyz=${ready:-none}"
+            sleep 10
+          done
+          echo '::error::the pre-release slot never reported this commit as ready'
+          # /readyz says WHY when it is not ready — an unreachable platform API, most
+          # often — so print it rather than making someone go and look.
+          curl -s --max-time 10 "$HUB_URL/readyz" || true
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # The gate. Everything below this point is irreversible-ish; everything above it is
+  # invisible to production.
+  # ---------------------------------------------------------------------------
+  verify-prerelease:
+    name: Verify the pre-release slot
+    runs-on: ubuntu-latest
+    needs: deploy-prerelease
+    environment:
+      name: prerelease
+      url: ${{ vars.HUB_PRERELEASE_URL }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
-
-      # The gate: the suite runs inside the image, so nothing red ever gets pushed.
-      - name: Run the suite inside the image
-        uses: docker/build-push-action@v6
+      - uses: actions/setup-node@v4
         with:
-          context: .
-          target: test
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          node-version: '22'
+          cache: npm
 
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm ci
 
-      - name: Derive tags and labels
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix=sha-
+      # Tier 1 first: if the platform API's behaviour has changed, every failure above
+      # it is a symptom and this is the cause.
+      - name: Tier 1 — the platform API still behaves as the hub assumes
+        env:
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN }}
+          VERIFY_SERVICE_TOKEN: ${{ secrets.VERIFY_SERVICE_TOKEN }}
+        run: npm run verify:upstream -- --url='${{ vars.PIVOTLY_API_URL }}'
 
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: runtime
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Summarise
+      - name: Tiers 1-3 against the deployed slot
+        env:
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN }}
+          VERIFY_SERVICE_TOKEN: ${{ secrets.VERIFY_SERVICE_TOKEN }}
         run: |
-          {
-            echo "### Published"
-            echo
-            echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
-            echo '```'
-            echo
-            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
-            echo
-            echo "Run it:"
-            echo '```sh'
-            echo "docker run --rm -i ghcr.io/${{ env.IMAGE_NAME }}:latest"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          npm run e2e -- \
+            --hub-url='${{ vars.HUB_PRERELEASE_URL }}' \
+            --api-url='${{ vars.PIVOTLY_API_URL }}' \
+            --channel=prerelease \
+            --expect-commit='${{ github.sha }}'
+
+      # The check that would have caught the original cascade. The client's prerelease
+      # pin must match what the slot is serving; if it does not, promoting would put a
+      # surface into production that no shipped client was built against.
+      - name: The client channel manifest matches the slot
+        run: npm run axle:autopatch -- --check --channel=prerelease
+
+  # ---------------------------------------------------------------------------
+  promote:
+    name: Swap into production
+    runs-on: ubuntu-latest
+    needs: verify-prerelease
+    if: ${{ github.event.inputs.skip-promotion != 'true' }}
+    environment:
+      # Add a required reviewer to this environment in repository settings to make
+      # promotion a human decision. The gate belongs here and not earlier: everything
+      # before this point is reversible without anyone noticing.
+      name: production
+      url: ${{ vars.HUB_PRODUCTION_URL }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Production's own settings, applied to the slot before the swap. App Service
+      # swaps slot-specific settings with the slot unless they are marked sticky, so
+      # HUB_CHANNEL has to be set to `production` on the thing that is about to become
+      # production — otherwise production comes up believing it is pre-release.
+      - name: Set the production channel on the slot before swapping
+        run: |
+          az webapp config appsettings set \
+            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
+            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
+            --slot prerelease \
+            --settings HUB_CHANNEL=production PIVOTLY_API_URL='${{ vars.PIVOTLY_API_URL_PRODUCTION }}' \
+            --output none
+
+          # Wait for the slot to come back up on the new settings before swapping, and
+          # confirm it still reports ready against the PRODUCTION API — a slot that is
+          # healthy against the pre-release API may not be.
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 '${{ vars.HUB_PRERELEASE_URL }}/readyz' || true)
+            [ "$code" = "200" ] && { echo 'ok  the slot is ready on production settings'; break; }
+            echo "attempt $attempt/30: readyz=${code:-none}"
+            sleep 10
+            [ "$attempt" = "30" ] && { echo '::error::the slot did not become ready on production settings'; exit 1; }
+          done
+
+      # The swap itself. App Service warms the slot, then exchanges the two — so the
+      # instances taking production traffic are the ones that already passed every
+      # check above, and the old production build lands in the slot as the rollback.
+      - name: Swap the slot into production
+        run: |
+          az webapp deployment slot swap \
+            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
+            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
+            --slot prerelease \
+            --target-slot production \
+            --output none
+          echo 'ok  swapped; the previous production build is now in the prerelease slot'
+
+  # ---------------------------------------------------------------------------
+  verify-production:
+    name: Verify production
+    runs-on: ubuntu-latest
+    needs: promote
+    environment:
+      name: production
+      url: ${{ vars.HUB_PRODUCTION_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: The same smoke test, now against production
+        env:
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN_PRODUCTION }}
+        run: |
+          npm run smoke -- \
+            --url='${{ vars.HUB_PRODUCTION_URL }}' \
+            --channel=production \
+            --expect-commit='${{ github.sha }}'
+
+      - name: Tiers 2 and 3 against production
+        env:
+          SMOKE_TOKEN: ${{ secrets.SMOKE_TOKEN_PRODUCTION }}
+        run: |
+          # Tier 1 is skipped: it writes a record, and production is not the place to
+          # prove the write path works. Tier 1 already ran against pre-release, which
+          # shares the platform API's behaviour.
+          npm run e2e -- \
+            --tiers=2,3 \
+            --hub-url='${{ vars.HUB_PRODUCTION_URL }}' \
+            --channel=production \
+            --expect-commit='${{ github.sha }}'
+
+  # ---------------------------------------------------------------------------
+  # Rollback. Runs only if production verification failed AFTER a successful swap,
+  # which is the one situation where production is serving a build that has just been
+  # shown to be bad. Swapping back is seconds, because the previous build is still
+  # running in the slot.
+  # ---------------------------------------------------------------------------
+  rollback:
+    name: Roll back the swap
+    runs-on: ubuntu-latest
+    needs: [promote, verify-production]
+    if: ${{ always() && needs.promote.result == 'success' && needs.verify-production.result == 'failure' }}
+    environment:
+      name: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Swap back
+        run: |
+          az webapp deployment slot swap \
+            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
+            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
+            --slot prerelease \
+            --target-slot production \
+            --output none
+          echo '::warning::production verification failed after the swap; rolled back to the previous build'
+
+      - name: Confirm the rollback is serving and healthy
+        run: |
+          for attempt in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 '${{ vars.HUB_PRODUCTION_URL }}/readyz' || true)
+            [ "$code" = "200" ] && { echo 'ok  production is ready again'; exit 0; }
+            sleep 5
+          done
+          echo '::error::production is not ready after the rollback — this needs a human'
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # The client's half of the release. Deliberately last: the pin records what
+  # production is VERIFIED to be serving, so it can never point at a build that was
+  # deployed and then rolled back.
+  # ---------------------------------------------------------------------------
+  sync-client:
+    name: Sync the client channel and publish the release
+    runs-on: ubuntu-latest
+    needs: verify-production
+    permissions:
+      contents: write # to commit the pin and create the release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The default checkout is detached at the tag; the pin has to land on a
+          # branch to be of any use to anyone.
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Reads production's /version and advances the pin to the digest it is actually
+      # serving. Refuses if that digest is not the one this checkout builds, so a
+      # mid-rollout state cannot be recorded as a pin.
+      - name: Advance the production channel pin
+        run: npm run axle:autopatch -- --sync-pin --channel=production
+
+      - name: Commit the pin if it moved
+        run: |
+          if git diff --quiet -- packages/clients/axle; then
+            echo 'ok  the client pin was already current; nothing to commit'
+            exit 0
+          fi
+          git config user.name 'pivotly-ci'
+          git config user.email 'ci@pivotly.com'
+          git add packages/clients/axle/channels.json packages/clients/axle/.mcp.json
+          git commit \
+            -m 'chore(axle): pin production channel to the verified deploy' \
+            -m 'Advanced by CD after ${{ github.sha }} passed production verification. The pin now records the contract production is actually serving.'
+          git push origin main
+
+      - name: Re-verify the client after the pin moved
+        run: |
+          npm run versions:verify
+          npm run axle:verify
+          npm run axle:autopatch -- --check --channel=production
+
+      - name: Publish the release
+        if: ${{ github.ref_type == 'tag' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            The Pivotly hub is deployed and verified on the production channel, and the
+            Axle client manifest is pinned to the contract it is serving.
+
+            Install this exact version:
+
+            ```
+            /plugin marketplace add ${{ github.repository }}@${{ github.ref_name }}
+            /plugin install axle@pivotly
+            ```
+
+            Set `PIVOTLY_MCP_TOKEN` to a Pivotly client token before use. The client
+            surface is read-only; write and queue operations require a service
+            credential and are not reachable from a plugin.

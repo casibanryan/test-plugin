@@ -1,0 +1,19 @@
+{
+  "name": "@pivotly/e2e",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Multi-tier end-to-end suite: platform invariants, remote MCP protocol behaviour, and client/channel compatibility against a live hub endpoint.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "e2e": "node run.js",
+    "test": "node run.js --tiers=3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@pivotly/axle": "*",
+    "@pivotly/contract": "*",
+    "@pivotly/hub": "*"
+  }
+}

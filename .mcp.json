@@ -1,9 +1,14 @@
 {
+  "_comment": "Project-scoped MCP config for working ON this repo — not the config the Axle plugin ships. That one is generated at packages/clients/axle/.mcp.json. This points at a hub running on your own machine, so start both halves first:  npm run dev:api  (the fake platform API, port 8790)  and  npm run dev:hub  (the hub, port 8787). Until they are up, this server will simply fail to connect.",
   "mcpServers": {
-    "greeting": {
-      "_comment": "Local stdio MCP server. No auth, no network, no env needed. Swap command/args for the docker form below if you prefer running it in a container: \"command\": \"docker\", \"args\": [\"run\", \"--rm\", \"-i\", \"ghcr.io/OWNER/greeting-plugin:latest\"].",
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/servers/greeting-server.js"]
+    "pivotly-hub-local": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": {
+        "authorization": "Bearer ${PIVOTLY_MCP_TOKEN}",
+        "x-pivotly-channel": "local",
+        "x-pivotly-contract": "0.2.0"
+      }
     }
   }
 }
