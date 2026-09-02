@@ -1,5 +1,5 @@
 {
-  "name": "Test Plugin",
+  "name": "Test-Plugin",
   "description": "Pivotly Claude clients. Installing from here gets you the Axle plugin, which connects Claude Code to the Pivotly MCP hub.",
   "owner": {
     "name": "Resty",
