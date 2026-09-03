@@ -180,7 +180,10 @@ function simulateMarketplaceInstall() {
 
   const pluginDir = path.join(dir, 'packages', 'clients', 'axle');
   const problems = [];
-  for (const rel of ['.claude-plugin/plugin.json', '.mcp.json', 'skills']) {
+  // The same list _verify.yml checks. The hooks are in it because the version notice
+  // is the only thing that tells a user their plugin moved, and a hook file left out
+  // of the export fails silently — the plugin installs, and simply never speaks.
+  for (const rel of ['.claude-plugin/plugin.json', '.mcp.json', 'skills', 'hooks/hooks.json', 'hooks/version-notice.js']) {
     if (!fs.existsSync(path.join(pluginDir, rel))) problems.push(`${rel} is missing from a clean export`);
   }
 
