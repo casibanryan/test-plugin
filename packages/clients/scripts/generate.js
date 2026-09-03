@@ -65,6 +65,10 @@ const SERVER_NAME = 'pivotly-hub';
 // is neither the hub nor remote. When someone reports a problem, the name they read off
 // their screen should say which of the two they are talking about.
 const BUNDLED_SERVER_NAME = 'pivotly-greeting';
+// Where the bundled server sits relative to the REPO root. The clients with no
+// plugin-root placeholder of their own (Codex, Gemini) have to name it this way, so
+// it is spelled out here once instead of once per writer.
+const BUNDLED_STDIO_ENTRY = 'packages/clients/axle/server/greeting-stdio.js';
 
 const arg = (name, fallback = null) => {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -175,7 +179,7 @@ function writeToml(client, channel) {
       '',
       `[mcp_servers.${key}]`,
       `command = ${quote(channel.command)}`,
-      `args = [${quote('packages/clients/axle/server/greeting-stdio.js')}]`,
+      `args = [${quote(BUNDLED_STDIO_ENTRY)}]`,
       '',
     ].join('\n');
   }
@@ -194,7 +198,40 @@ function writeToml(client, channel) {
   return lines.join('\n');
 }
 
-const WRITERS = { 'mcp-json': writeMcpJson, toml: writeToml };
+// Gemini CLI style: settings.json, also an mcpServers object — near enough to Claude
+// Code's to look like the same writer, and different in two ways that would fail
+// silently if it were:
+//
+//   http    the key is `httpUrl`. Gemini reads a plain `url` as an SSE endpoint, so
+//           the mcp-json shape would point it at a transport the hub does not serve.
+//   stdio   no `type` field. The key you use IS the transport.
+//
+// The block belongs in .gemini/settings.json (this project only) or
+// ~/.gemini/settings.json (every project).
+function writeGeminiJson(client, channel) {
+  const server =
+    channel.transport === 'stdio'
+      ? {
+          command: channel.command,
+          // Gemini has no CLAUDE_PLUGIN_ROOT, so — as with Codex — the bundled server
+          // is named by a repo-relative path. That is honest about what this is: a
+          // config for someone who has this repository checked out.
+          args: [BUNDLED_STDIO_ENTRY],
+        }
+      : { httpUrl: channel.url, headers: headersFor(client, channel) };
+
+  return `${JSON.stringify(
+    {
+      _comment: GENERATED_NOTE(client, channel),
+      mcpServers: { [channel.transport === 'stdio' ? BUNDLED_SERVER_NAME : SERVER_NAME]: server },
+    },
+    null,
+    2
+  )}
+`;
+}
+
+const WRITERS = { 'mcp-json': writeMcpJson, toml: writeToml, 'gemini-json': writeGeminiJson };
 
 // The config every declared client should currently have, as text.
 function renderAll(channel, only = null) {
@@ -519,7 +556,7 @@ async function main() {
   console.log(`ok    channel "${channel.name}" is in sync across ${rendered.length} client(s) — contract ${contractDigest()} (${CONTRACT_VERSION})`);
 }
 
-module.exports = { renderAll, headersFor, resolveChannel, writeMcpJson, writeToml, WRITERS, SERVER_NAME, CHANNELS_PATH, getClient };
+module.exports = { renderAll, headersFor, resolveChannel, writeMcpJson, writeToml, writeGeminiJson, WRITERS, SERVER_NAME, CHANNELS_PATH, getClient };
 
 if (require.main === module) {
   main().catch((err) => {

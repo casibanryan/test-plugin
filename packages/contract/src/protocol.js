@@ -95,6 +95,19 @@ const CLIENTS = [
     configPath: 'config.toml',
     plugin: false,
   },
+  {
+    id: 'gemini',
+    title: 'Gemini CLI',
+    host: 'Gemini CLI',
+    // Near enough to Claude Code's mcp-json to be tempting to share a writer with,
+    // and deliberately not: Gemini names an HTTP server with `httpUrl` (a plain
+    // `url` means SSE there) and has no `type` discriminator. A shared writer would
+    // emit a config Gemini reads as a different transport — a failure that surfaces
+    // at connect time rather than at generate time.
+    format: 'gemini-json',
+    configPath: 'settings.json',
+    plugin: false,
+  },
 ];
 
 const CLIENT_IDS = CLIENTS.map((c) => c.id).sort();

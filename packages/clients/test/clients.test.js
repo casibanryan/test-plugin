@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile);
 const { CHANNELS, HARDENED_CHANNELS, ENDPOINTS, HEADERS, CLIENTS, CONTRACT_VERSION, transportOf, STDIO_CHANNELS } = require('@pivotly/contract/protocol');
 const { contractDigest } = require('@pivotly/contract/digest');
 const { compareContract } = require('@pivotly/contract');
-const { renderAll, headersFor, writeToml, writeMcpJson } = require('../scripts/generate');
+const { renderAll, headersFor, writeToml, writeMcpJson, writeGeminiJson } = require('../scripts/generate');
 
 const ROOT = path.join(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'channels.json'), 'utf8'));
@@ -137,6 +137,32 @@ test('the toml writer refuses a value it cannot safely quote', () => {
   // Better to fail loudly than to emit a malformed config that the host silently
   // ignores or half-parses.
   assert.throws(() => writeToml({ id: 'codex' }, { name: 'dev', url: 'https://x.test/"quoted"/mcp' }), /needs TOML escaping/);
+});
+
+test('the gemini writer uses httpUrl, not the url key that mcp-json emits', () => {
+  // The whole reason this client does not share the mcp-json writer. Gemini reads a
+  // plain `url` as an SSE endpoint, so emitting one would point it at a transport the
+  // hub does not serve — and it would fail at connect time, not here.
+  const config = JSON.parse(writeGeminiJson({ id: 'gemini' }, { name: 'dev', transport: 'http', url: 'https://x.test/mcp' }));
+  const server = config.mcpServers['pivotly-hub'];
+  assert.equal(server.httpUrl, 'https://x.test/mcp');
+  assert.equal(server.url, undefined, 'a plain url would be read as SSE');
+  assert.equal(server.type, undefined, 'gemini has no type discriminator; the key is the transport');
+  assert.equal(server.headers[HEADERS.client], 'gemini');
+  assert.equal(server.headers[HEADERS.channel], 'dev');
+});
+
+test('the gemini writer names the bundled server by a repo-relative path', () => {
+  // Gemini has no CLAUDE_PLUGIN_ROOT to substitute, so the placeholder Claude Code
+  // gets would reach it verbatim and never resolve.
+  const channel = { name: 'bundled', ...manifest.channels.bundled };
+  const config = JSON.parse(writeGeminiJson({ id: 'gemini' }, channel));
+  const server = config.mcpServers['pivotly-greeting'];
+  assert.equal(server.command, 'node');
+  assert.deepEqual(server.args, ['packages/clients/axle/server/greeting-stdio.js']);
+  assert.equal(server.httpUrl, undefined, 'a stdio channel has no address');
+  assert.equal(server.headers, undefined, 'a stdio channel makes no request to identify');
+  assert.ok(server.args.every((a) => !a.includes('CLAUDE_PLUGIN_ROOT')), 'gemini cannot substitute that placeholder');
 });
 
 test('renderAll covers every declared client, and can target one', () => {
