@@ -1,0 +1,111 @@
+# .github/workflows/bump.yml
+#
+# The button that makes an installed plugin update.
+#
+# Claude Code decides an update exists by comparing the version in marketplace.json
+# against the one it has cached. So a client sees nothing at all until that number
+# moves — a deploy, a passing pipeline and a green tick change nothing on anybody's
+# machine on their own.
+#
+# Manual only, and deliberately not folded into cd.yml: a job that bumped on every
+# push to main would push a commit that triggers itself. Manual also means the choice
+# of patch/minor/major stays a human one, which is what semver is for.
+#
+# `bump` has no "none" option, so both jobs run on every dispatch and no run reports a
+# skip. See the note in cd.yml about why that matters.
+
+name: Bump version
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to move.
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+concurrency:
+  group: bump-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Verify BEFORE bumping. A version bump on a tree that does not pass is a version
+  # number attached to nothing.
+  verify:
+    name: Verify
+    uses: ./.github/workflows/_verify.yml
+
+  bump:
+    name: Bump and push
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      contents: write
+    steps:
+      # The branch this workflow was dispatched from, which is the branch the bump
+      # lands on. Verifying one ref and committing to another would mean pushing a
+      # tree nothing checked.
+      - name: A branch, not a tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" != 'branch' ]; then
+            echo "::error::dispatched from a $GITHUB_REF_TYPE ($GITHUB_REF_NAME). A bump has to land on a branch."
+            exit 1
+          fi
+          echo "ok  bumping on $GITHUB_REF_NAME"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      # One script owns every version string — eight files, plus the contract digest,
+      # both generated client configs and package-lock.json. Bumping by hand is the
+      # exact drift versions:verify exists to catch, so it is not done by hand here.
+      - name: Bump every version in lockstep
+        run: npm run version:bump -- ${{ github.event.inputs.bump }}
+
+      # The bumped tree is a tree no run has ever seen: the push below is made with
+      # GITHUB_TOKEN and so deliberately triggers no workflow of its own. Verify it
+      # here, or it reaches a user's machine unverified.
+      - name: The bumped tree still passes everything
+        run: npm run verify:all
+
+      - name: Commit the bump
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if git diff --quiet; then
+            echo "::error::nothing changed — the tree is already at $version"
+            exit 1
+          fi
+          git config user.name 'pivotly-ci'
+          git config user.email 'ci@pivotly.com'
+          git commit -a \
+            -m "chore(release): $version" \
+            -m 'Every package, the contract digest, the plugin manifest, the marketplace entry and every generated client config, bumped together by CD.'
+          git push origin "HEAD:$GITHUB_REF_NAME"
+          echo "PLUGIN_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Say what an installed client will see
+        run: |
+          {
+            echo "### axle $PLUGIN_VERSION is now on \`$GITHUB_REF_NAME\`"
+            echo ""
+            echo "A client whose marketplace tracks this branch updates on its next refresh:"
+            echo ""
+            echo '    /plugin marketplace update Test-Plugin'
+            echo '    /plugin update axle@Test-Plugin'
+            echo ""
+            echo 'Or on its own at startup, with `"autoUpdate": true` on the marketplace'
+            echo 'entry in `~/.claude/settings.json`. The plugin then reports the change'
+            echo 'itself on the next session start, from its own SessionStart hook.'
+          } >> "$GITHUB_STEP_SUMMARY"

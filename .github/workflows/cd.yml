@@ -1,45 +1,36 @@
 # .github/workflows/cd.yml
 #
-# NO-AZURE MODE. This is the demo pipeline: it verifies the repo and publishes the
-# PLUGIN, and it touches no cloud at all. The full channel ladder — dev slot,
-# prerelease slot, approval gate, slot swap into production, rollback — is preserved
-# verbatim on the `with-azure` branch, and comes back by restoring that file.
+# NO-AZURE MODE. The full channel ladder — dev slot, prerelease slot, approval gate,
+# slot swap into production, rollback — is preserved verbatim on the `with-azure`
+# branch and comes back by restoring that file. What is left is the half that actually
+# reaches a user's machine, and it touches no cloud at all.
 #
-# What is left is the half that actually reaches a user's machine:
+# THIS FILE HANDLES ONE TRIGGER: a push to main. The other two rungs are their own
+# workflows — release.yml on a tag, bump.yml on a manual dispatch — and that split is
+# deliberate.
 #
-#   push to main              verify, then report what version main now serves. A
-#                             client whose marketplace tracks main picks that up on
-#                             its next refresh.
-#   workflow_dispatch (bump)  bump every version string in lockstep, verify the
-#                             result, push it to main. This is the button that makes
-#                             an installed plugin update, because Claude Code decides
-#                             an update exists by comparing marketplace.json's version
-#                             against the one it has cached.
-#   tag v*.*.*                verify, then publish the GitHub release.
+# One workflow serving three triggers can only ever run a subset of its jobs, so every
+# run reports a mix of green and grey and a reader has to know the `if:` conditions to
+# tell an intended skip from a broken one. "Success, with three jobs skipped" is not a
+# result anyone can act on. One workflow per trigger means every job in every run
+# actually runs, and a green run is green all the way across.
 #
-# Removed along with Azure, deliberately, because each one needs a live hub to read:
-#
-#   * every deploy, slot swap and rollback step
+# What a push to main does NOT do here, because both need a live hub to read:
+#   * deploy anything
 #   * `clients:sync-pin`, which reads the channel's /version — so channels.json keeps
-#     the lastVerified records it has rather than being advanced by a run that
+#     the lastVerified records it has, rather than being advanced by a run that
 #     deployed nothing
-#   * the e2e tiers against a deployed URL. Tiers 1-3 still run in _verify.yml,
-#     against a hub the suite starts itself.
+# The e2e tiers still run in _verify.yml, against a hub the suite starts itself.
 
 name: CD
 
 on:
   push:
     branches: [main]
-    tags: ['v*.*.*']
-  workflow_dispatch:
-    inputs:
-      bump:
-        description: Bump every version in lockstep and push to main — this is what makes an installed plugin see an update.
-        type: choice
-        options: [none, patch, minor, major]
-        default: none
 
+# Never cancel in flight. Nothing here is destructive today, but the bump workflow
+# pushes commits and the release workflow publishes, and a half-finished release is
+# worse than a slow one.
 concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: false
@@ -50,90 +41,20 @@ permissions:
 jobs:
   # ---------------------------------------------------------------------------
   # The same checks CI runs, from one definition rather than two that drift. Needs no
-  # cloud credentials at all, which is exactly why it survives Azure being removed.
+  # cloud credentials at all, which is why it survives Azure being removed.
   verify:
     name: Verify
     uses: ./.github/workflows/_verify.yml
-    with:
-      tag: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
-  # ===========================================================================
-  # The version bump. Manual on purpose: a job that bumped on every push to main
-  # would push a commit that triggers itself.
-  # ===========================================================================
-  bump:
-    name: Bump the version and push to main
-    runs-on: ubuntu-latest
-    needs: verify
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.bump != 'none' }}
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # It has to land on a branch to be of use to anyone.
-          ref: main
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-      - run: npm ci
-
-      # One script owns every version string — nine files, including the contract
-      # digest and the client configs generated from it. Bumping by hand is the exact
-      # drift versions:verify exists to catch, so it is not done by hand here either.
-      - name: Bump every version in lockstep
-        run: npm run version:bump -- ${{ github.event.inputs.bump }}
-
-      # The bumped tree is a tree no run has ever seen: the push below is made with
-      # GITHUB_TOKEN and so deliberately triggers no workflow. Verify it here, or it
-      # reaches a user's machine unverified.
-      - name: The bumped tree still passes everything
-        run: npm run verify:all
-
-      - name: Commit the bump
-        run: |
-          version=$(node -p "require('./package.json').version")
-          if git diff --quiet; then
-            echo "::error::nothing changed — the tree is already at $version"
-            exit 1
-          fi
-          git config user.name 'pivotly-ci'
-          git config user.email 'ci@pivotly.com'
-          git commit -a \
-            -m "chore(release): $version" \
-            -m 'Every package, the contract digest, the plugin manifest, the marketplace entry and every generated client config, bumped together by CD.'
-          git push origin HEAD:main
-          echo "PLUGIN_VERSION=$version" >> "$GITHUB_ENV"
-
-      - name: Say what an installed client will see
-        run: |
-          {
-            echo "### axle $PLUGIN_VERSION is now on main"
-            echo ""
-            echo "A client whose marketplace tracks main updates on its next refresh:"
-            echo ""
-            echo '    /plugin marketplace update Test-Plugin'
-            echo ""
-            echo 'Or on its own at startup, with `"autoUpdate": true` on the marketplace'
-            echo 'entry in `~/.claude/settings.json`.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # ===========================================================================
-  # What main serves right now. No deploy and no gate — just the record of what a
-  # marketplace refresh would hand a user, so a green run says something checkable.
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # What main serves now. No deploy and no gate — the record of what a marketplace
+  # refresh would hand a user, so a green run says something checkable.
   live:
     name: Report what main serves
     runs-on: ubuntu-latest
     needs: verify
-    # `inputs.bump` is null on a push, and a null never equals a string in a GitHub
-    # expression — so the event has to be tested before the input, or this job would
-    # silently skip on every push, which is the one case it exists for.
-    if: ${{ github.ref_type != 'tag' && (github.event_name != 'workflow_dispatch' || github.event.inputs.bump == 'none') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: The plugin version on main
         run: |
@@ -142,8 +63,9 @@ jobs:
           plugin=$(node -p "require('./packages/clients/axle/.claude-plugin/plugin.json').version")
 
           # versions:verify already asserted this in the verify job. Repeated because
-          # this is the one number a user's client compares, and a summary quoting a
-          # number that nothing checked would be worse than no summary.
+          # this is the one number a user's client compares against its cached copy to
+          # decide an update exists, and a summary quoting a number that nothing
+          # checked would be worse than no summary.
           if [ "$marketplace" != "$plugin" ]; then
             echo "::error::marketplace.json says $marketplace, plugin.json says $plugin"
             exit 1
@@ -162,37 +84,3 @@ jobs:
             echo "itself is not deployed in no-Azure mode, so its tools will not answer."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "ok  main serves axle $plugin at ${GITHUB_SHA:0:12}"
-
-  # ===========================================================================
-  # The release. On a tag only — verify has already asserted that the tag and the
-  # repo version agree.
-  # ===========================================================================
-  release:
-    name: Publish the release
-    runs-on: ubuntu-latest
-    needs: verify
-    if: ${{ github.ref_type == 'tag' }}
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          body: |
-            The Axle plugin is verified and published at `${{ github.ref_name }}`.
-
-            **Claude Code**
-
-            ```
-            /plugin marketplace add ${{ github.repository }}
-            /plugin install axle@Test-Plugin
-            ```
-
-            **Codex CLI** — append `packages/clients/codex/config.toml` to `~/.codex/config.toml`.
-
-            > Cut with the pipeline in no-Azure mode: everything was verified against a
-            > hub the test suite starts itself, and no hub was deployed. The client
-            > configs still point at the production channel URL, which will not answer
-            > until the Azure pipeline on the `with-azure` branch is restored and run.
