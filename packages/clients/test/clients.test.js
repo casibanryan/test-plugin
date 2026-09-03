@@ -18,7 +18,7 @@ const { promisify } = require('node:util');
 
 const execFileAsync = promisify(execFile);
 
-const { CHANNELS, HARDENED_CHANNELS, ENDPOINTS, HEADERS, CLIENTS, CONTRACT_VERSION } = require('@pivotly/contract/protocol');
+const { CHANNELS, HARDENED_CHANNELS, ENDPOINTS, HEADERS, CLIENTS, CONTRACT_VERSION, transportOf, STDIO_CHANNELS } = require('@pivotly/contract/protocol');
 const { contractDigest } = require('@pivotly/contract/digest');
 const { compareContract } = require('@pivotly/contract');
 const { renderAll, headersFor, writeToml, writeMcpJson } = require('../scripts/generate');
@@ -70,6 +70,11 @@ test('no committed client config contains a credential', () => {
 test('hardened channels are https, and local is the only plaintext exception', () => {
   for (const [name, channel] of Object.entries(manifest.channels)) {
     if (name === 'local') continue;
+    // A stdio channel has no address at all, so there is no scheme to hold to https.
+    if (transportOf(name) === 'stdio') {
+      assert.equal(channel.url, undefined, `${name} is stdio and must not carry a url`);
+      continue;
+    }
     assert.ok(channel.url.startsWith('https://'), `${name} must be https, got ${channel.url}`);
   }
   assert.equal(manifest.channels.local.requireHttps, false);
@@ -78,10 +83,23 @@ test('hardened channels are https, and local is the only plaintext exception', (
 });
 
 test('every channel url is distinct and targets the contract MCP path', () => {
-  const urls = Object.values(manifest.channels).map((c) => c.url);
+  const withUrls = Object.entries(manifest.channels).filter(([name]) => transportOf(name) === 'http');
+  const urls = withUrls.map(([, c]) => c.url);
   assert.equal(new Set(urls).size, urls.length, 'two channels share a url; promoting one would promote the other');
-  for (const [name, channel] of Object.entries(manifest.channels)) {
+  for (const [name, channel] of withUrls) {
     assert.ok(channel.url.endsWith(ENDPOINTS.mcp), `${name}: ${channel.url}`);
+  }
+});
+
+test('a stdio channel declares a command and a relocatable path', () => {
+  for (const name of STDIO_CHANNELS) {
+    const channel = manifest.channels[name];
+    assert.ok(channel, `${name} is declared by the contract but missing from the manifest`);
+    assert.ok(channel.command, `${name} must declare a command to run`);
+    assert.ok(Array.isArray(channel.args) && channel.args.length > 0, `${name} must declare args`);
+    // The install directory carries the version number, so an absolute path would work
+    // for exactly one release.
+    for (const a of channel.args) assert.ok(!/^([A-Za-z]:[\\/]|\/)/.test(a), `${name}: ${a} is an absolute path`);
   }
 });
 
@@ -137,9 +155,11 @@ test('renderAll covers every declared client, and can target one', () => {
 function scratchCopy() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pivotly-clients-'));
   fs.copyFileSync(path.join(ROOT, 'channels.json'), path.join(dir, 'channels.json'));
+  // The whole client directory, not just its config file: a client can own more than
+  // one generated artifact (the bundled server's tools.json), and a scratch copy
+  // missing one would report drift that says nothing about the test.
   for (const client of CLIENTS) {
-    fs.mkdirSync(path.join(dir, client.id), { recursive: true });
-    fs.copyFileSync(path.join(ROOT, client.id, client.configPath), path.join(dir, client.id, client.configPath));
+    fs.cpSync(path.join(ROOT, client.id), path.join(dir, client.id), { recursive: true });
   }
   return dir;
 }
@@ -229,6 +249,11 @@ test('--check does NOT fail when a channel was last verified on an older contrac
   };
   fs.writeFileSync(manifestPath, JSON.stringify(scratch, null, 2));
 
+  // The committed configs are generated for the default channel, so point the scratch
+  // copy at production first — otherwise this asserts on drift rather than on how an
+  // out-of-date verification record is treated.
+  await run(dir, ['--write', '--channel=production']);
+
   const res = await run(dir, ['--check', '--channel=production', '--timeout-ms=300']);
   assert.equal(res.code, 0, res.stderr);
   assert.match(res.stdout, /normal until it is deployed/);
@@ -251,6 +276,7 @@ test('--check tolerates an unreachable channel rather than failing CI on network
   // A fork's pull request has no route to Azure. Requiring one would make CI depend on
   // a deployed environment, so unreachable is a note, not a failure.
   const dir = scratchCopy();
+  await run(dir, ['--write', '--channel=production']);
   const res = await run(dir, ['--check', '--channel=production', '--timeout-ms=300']);
   assert.equal(res.code, 0, res.stderr);
   assert.match(res.stdout, /not reachable/);

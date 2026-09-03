@@ -1,67 +1,73 @@
 # LOCAL.RUN.md
 
-How to run the pipeline on this machine, and how to watch a CD version bump actually
-reach the plugin in your Claude Code — ending with a greeting that reports its own
-version.
+How to run the pipeline on this machine, and how to watch a version bump reach the
+plugin in your Claude Code — ending with a greeting that answers from the plugin's own
+MCP server and reports its own version.
 
-Where things stand right now:
+Nothing here needs Azure, a host, an account or a token.
 
 | | |
 |---|---|
 | this branch | `without-azure`, version **0.3.1** |
 | `main` | version **0.3.0** |
 | plugin installed in your Claude Code | **0.3.0** |
-| the hub | not deployed — `pivotly-hub.azurewebsites.net` does not resolve |
-
-That gap is the demo: 0.3.0 installed, 0.3.1 on the branch.
+| where the tools come from | `pivotly-greeting` — a stdio server **inside the plugin** |
 
 ---
 
-## Part 1 — Run CI locally
+## Part 1 — Prove the tools work, right now
+
+No install, no server, no network:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"greeting_hello","arguments":{"name":"Resty","hour":9}}}' \
+  | node packages/clients/axle/server/greeting-stdio.js
+```
+
+You get back the greeting as JSON-RPC. That is the same process Claude Code spawns when
+the plugin loads, so if this answers, the plugin's tools will answer.
+
+---
+
+## Part 2 — Run CI locally
 
 ```bash
 npm run ci:local
 ```
 
-Runs the same five jobs `_verify.yml` runs, and prints them under the same job names.
-Takes about 45 seconds.
-
-Expected last line:
+The same five jobs `_verify.yml` runs, under the same job names, in about 45 seconds.
+Ends with:
 
 ```
 ok    every offline CI job passes on this machine
 ```
 
-Faster subsets while you work:
+The `client` job includes the one that matters most here: it exports the repo the way a
+marketplace install copies it, then **spawns the bundled server from that export** and
+checks it answers. A missing file or a stray dependency fails there rather than on
+someone's laptop.
+
+Faster subsets:
 
 ```bash
-npm run ci:local -- --list           # what would run
-npm run ci:local -- --skip=artifact  # skip the slow job (~27s)
+npm run ci:local -- --list
+npm run ci:local -- --skip=artifact   # skips the slow job (~21s)
 npm run ci:local -- --job=client
-npm run verify:all                   # contract + versions + tests + clients
-npm run e2e                          # 3 tiers against a hub the suite starts
+npm run verify:all
+npm run e2e                           # 3 tiers against a hub the suite starts
 ```
-
-This proves the **steps**. It cannot prove the workflow wiring (job `needs`, the
-matrix, artifact upload) — only GitHub runs that.
 
 ---
 
-## Part 2 — Make CD bump the version
+## Part 3 — Bump the version
 
-The plugin only looks "updated" when the version number moves, because Claude Code
-compares `marketplace.json`'s version against the one it has cached.
+The plugin only looks "updated" when the version moves, because Claude Code compares
+`marketplace.json`'s version against the one it has cached.
 
-### Option A — let CD do it (this is the demo)
+**Let CD do it:** Actions → **Bump version** → Run workflow → branch `without-azure`,
+`patch`. It verifies, bumps every version in lockstep, verifies again, and pushes.
 
-1. Go to **Actions → Bump version → Run workflow**.
-2. Pick the branch `without-azure`, choose `patch`, run it.
-3. It verifies, bumps every version in lockstep, verifies again, and pushes the commit
-   to that branch. 0.3.1 becomes 0.3.2.
-
-Both jobs run every time — nothing is skipped.
-
-### Option B — bump locally
+**Or locally:**
 
 ```bash
 npm run version:bump -- patch
@@ -71,17 +77,15 @@ git push
 ```
 
 Never edit versions by hand. One script owns all eight files plus the contract digest,
-both client configs and `package-lock.json`; `npm run versions:verify` fails the build
-if any one disagrees.
+both client configs, the bundled server's `tools.json` and `package-lock.json`.
 
 ---
 
-## Part 3 — Point your Claude Code at this branch
+## Part 4 — Point your Claude Code at this branch
 
-Your marketplace tracks the repo's default branch (`main`), which is still 0.3.0. Point
-it at the branch you are working on instead.
+Your marketplace tracks the repo's default branch (`main`), still 0.3.0.
 
-**Step 1.** Edit `~/.claude/settings.json`:
+**Step 1.** In `~/.claude/settings.json`:
 
 ```json
 "extraKnownMarketplaces": {
@@ -101,7 +105,7 @@ it at the branch you are working on instead.
   to **false** for non-Anthropic marketplaces — this is why nothing updated on its own
   before.
 
-**Step 2.** In Claude Code:
+**Step 2.**
 
 ```
 /plugin marketplace update Test-Plugin
@@ -115,58 +119,56 @@ If it ignores the new `ref`, remove and re-add — the old install location is c
 /plugin marketplace add casibanryan/test-plugin
 ```
 
-**Step 3.** Restart Claude Code.
+**Step 3.** Restart Claude Code. Check `/mcp` — `pivotly-greeting` should be connected.
+There is no `pivotly-hub` any more; that was the one that could not connect.
 
 ---
 
-## Part 4 — See it in a greeting
-
-Type:
+## Part 5 — Say hi
 
 ```
 hi
 ```
 
-The greeting skill runs and ends with the plugin's own banner:
+The greeting skill calls `greeting_hello` on the bundled server, delivers the reply, and
+signs off with:
 
 ```
-Axle plugin updated — v0.3.2 · 2026-09-04 15:12 · 17f41af · production channel
+Axle plugin updated — v0.3.2 · 2026-09-04 15:12 · 17f41af · bundled tools
 ```
 
 That is: the version actually loaded · when this machine took the update · the
-marketplace commit · which hub the build talks to.
+marketplace commit · where the tools came from.
 
-The numbers come from the plugin's `SessionStart` hook, which reads its own manifest
-and Claude Code's install record. So bump the version again, update, restart, greet —
-and the line changes. That is CD reaching your laptop, visible in a sentence.
+Bump again, update, restart, greet — the line changes. That is CD reaching your laptop,
+visible in one sentence, with a real MCP tool call behind it.
 
-**The greeting tools themselves will not answer**, because the hub is not deployed.
-The skill handles that: it greets you directly and says so once. The banner still
-shows — the plugin's version is a local fact and does not need the hub.
+---
 
-### Want the tools to work too
+## Optional — run against the hosted hub instead
+
+The hub still exists and still deploys; the bundled server did not replace it.
 
 ```bash
-npm run dev:hub                                    # terminal 1
-npm run clients:generate -- --channel=local        # terminal 2
+npm run dev:hub                                 # terminal 1
+npm run clients:generate -- --channel=local     # terminal 2
 ```
 
-The `--channel` flag works in PowerShell and bash alike; the `PIVOTLY_CHANNEL=local`
-env form in the README is bash-only.
+`--channel` works in PowerShell and bash alike; the `PIVOTLY_CHANNEL=local` env form is
+bash-only. Switch back with `--channel=bundled`.
 
-This rewrites the shipped `.mcp.json` to point at `127.0.0.1`. Useful locally, **do not
-commit it** — `npm run clients:check` will fail if you do.
+Both rewrite the shipped `.mcp.json`, so **do not commit** a config generated for
+anything but `bundled` — `npm run clients:check` will fail, which is the point.
 
 ---
 
 ## Checking and resetting
 
-What is actually installed:
-
 ```bash
 cat ~/.claude/plugins/installed_plugins.json    # version, lastUpdated, commit
 ls ~/.claude/plugins/cache/Test-Plugin/axle/    # one directory per version
 cat ~/.claude/pivotly/axle-version.json         # what the hook last saw
+node packages/clients/scripts/generate.js --print   # the resolved channel and transport
 ```
 
 To replay the "updated" wording without a real bump, rewind the hook's record and
@@ -183,7 +185,9 @@ echo '{"version":"0.3.0"}' > ~/.claude/pivotly/axle-version.json
 | Symptom | Cause |
 |---|---|
 | `/plugin update` says nothing to do | the version did not move. Bump it — the cache is keyed by version |
-| the banner never appears | the hook did not run. Check `/plugin` shows axle enabled, then `node packages/clients/axle/hooks/version-notice.js` by hand — it prints JSON |
+| `pivotly-greeting` fails to connect | run Part 1. If that answers, the plugin's copy is incomplete — reinstall it |
+| the banner never appears | the hook did not run. Check `/plugin` shows axle enabled, then run `node packages/clients/axle/hooks/version-notice.js` by hand — it prints JSON |
 | the banner shows an old version | Claude Code was not restarted. `SessionStart` only fires on a new session |
-| MCP shows `pivotly-hub` failed | expected. The hub is not deployed on this branch |
-| `versions:verify` fails | something was edited by hand. Run `npm run version:bump -- <version>` instead |
+| a tool call is refused | read the message — it names the field. On the bundled server this is never a network problem |
+| `clients:check` fails | a config was generated for a non-default channel, or hand-edited. `npm run clients:generate` |
+| `versions:verify` fails | something was edited by hand. Use `npm run version:bump -- <version>` |

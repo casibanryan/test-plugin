@@ -17,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const REPO_ROOT = path.join(__dirname, '..');
-const { CONTRACT_VERSION, CLIENTS, CHANNELS } = require('@pivotly/contract/protocol');
+const { CONTRACT_VERSION, CLIENTS, CHANNELS, transportOf } = require('@pivotly/contract/protocol');
 const { contractDigest } = require('@pivotly/contract/digest');
 
 const read = (rel) => JSON.parse(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'));
@@ -92,7 +92,13 @@ for (const client of CLIENTS) {
 for (const name of CHANNELS) {
   const channel = (channels.channels || {})[name];
   if (!ok(`channels.json declares "${name}"`, Boolean(channel))) continue;
-  ok(`channel "${name}" has a url`, Boolean(channel.url), JSON.stringify(channel));
+  // A channel is reachable either at an address or by a command. Demanding a url from
+  // a stdio channel would fail the one channel that cannot be misconfigured.
+  ok(
+    `channel "${name}" says where it is reached`,
+    transportOf(name) === 'stdio' ? Boolean(channel.command) : Boolean(channel.url),
+    JSON.stringify(channel)
+  );
 
   const lv = channel.lastVerified;
   if (lv == null) {

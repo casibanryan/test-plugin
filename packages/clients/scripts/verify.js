@@ -19,7 +19,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { CHANNELS, HARDENED_CHANNELS, ENDPOINTS, HEADERS, CLIENTS, CONTRACT_VERSION } = require('@pivotly/contract/protocol');
+const { CHANNELS, HARDENED_CHANNELS, ENDPOINTS, HEADERS, CLIENTS, CONTRACT_VERSION, transportOf } = require('@pivotly/contract/protocol');
 const { TOOL_NAMES } = require('@pivotly/contract/tools');
 const { contractDigest } = require('@pivotly/contract/digest');
 
@@ -69,9 +69,30 @@ if (manifest) {
     const channel = (manifest.channels || {})[name];
     if (!ok(`channels.json declares the "${name}" channel`, Boolean(channel))) continue;
 
-    ok(`${name} has a url`, Boolean(channel.url));
+    const transport = transportOf(name);
+    ok(`${name} has a transport the contract declares`, Boolean(transport), `contract declares no transport for "${name}"`);
+    ok(`${name} agrees with the contract about its transport`, !channel.transport || channel.transport === transport, `${channel.transport} vs ${transport}`);
     ok(`${name} has a description`, (channel.description || '').length > 10);
-    ok(`${name} url targets the contract MCP path`, String(channel.url || '').endsWith(ENDPOINTS.mcp), channel.url);
+
+    if (transport === 'stdio') {
+      // A stdio channel is a process the client starts, so what has to be true of it
+      // is completely different: a command to run, arguments to run it with, and no
+      // address at all. Checking it for an https url would fail a channel that
+      // correctly has none.
+      ok(`${name} declares a command to run`, Boolean(channel.command), JSON.stringify(channel));
+      ok(`${name} declares args`, Array.isArray(channel.args) && channel.args.length > 0, JSON.stringify(channel.args));
+      ok(`${name} declares no url, having no address`, !channel.url, channel.url);
+      // The install directory carries the version number, so an absolute path here
+      // would work exactly once and break on the next update.
+      ok(
+        `${name} locates its server through a placeholder, not an absolute path`,
+        (channel.args || []).every((a) => !/^([A-Za-z]:[\\/]|\/)/.test(String(a))),
+        JSON.stringify(channel.args)
+      );
+    } else {
+      ok(`${name} has a url`, Boolean(channel.url));
+      ok(`${name} url targets the contract MCP path`, String(channel.url || '').endsWith(ENDPOINTS.mcp), channel.url);
+    }
     // lastVerified is a RECORD of what this channel was last proven to serve, not a
     // requirement. It is null until that channel has been deployed, and it is allowed
     // to lag this checkout — that is the normal state while a version is in progress.
@@ -85,6 +106,7 @@ if (manifest) {
     }
 
     if (HARDENED_CHANNELS.includes(name)) {
+      ok(`${name} is not served over stdio, being a hardened channel`, transport === 'http', `transport is ${transport}`);
       ok(`${name} is https, being a hardened channel`, String(channel.url || '').startsWith('https://'), channel.url);
       ok(`${name} does not opt out of https`, channel.requireHttps !== false);
     }
@@ -106,9 +128,13 @@ if (manifest) {
     );
   }
 
-  // Two channels sharing a URL means promoting one silently promotes the other.
-  const urls = Object.values(manifest.channels || {}).map((c) => c.url);
-  ok('every channel has a distinct url', new Set(urls).size === urls.length, urls.join(', '));
+  // Two channels sharing a URL means promoting one silently promotes the other. Only
+  // the http channels take part: a stdio channel has no url, and several `undefined`
+  // entries would collapse into one and fail this for no reason.
+  const urls = Object.values(manifest.channels || {})
+    .map((c) => c.url)
+    .filter(Boolean);
+  ok('every channel with a url has a distinct one', new Set(urls).size === urls.length, urls.join(', '));
 }
 
 if (pkg) equal('package.json version tracks the contract version', pkg.version, CONTRACT_VERSION);
@@ -137,21 +163,39 @@ for (const client of CLIENTS) {
   ok(`${client.id} config contains nothing that looks like a secret`, suspicious.length === 0, `suspicious literals: ${suspicious.slice(0, 3).join(', ')}`);
   ok(`${client.id} config declares no Authorization header`, !/authorization/i.test(raw), 'the hub is anonymous; no auth header should be emitted');
 
-  // The URL must be the resolved channel's, and https unless loopback.
-  const urlMatch = raw.match(/https?:\/\/[^\s"']+/);
-  if (ok(`${client.id} config carries a hub url`, Boolean(urlMatch), raw.slice(0, 200))) {
-    const url = urlMatch[0];
-    const isLoopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(url);
-    ok(`${client.id} url is https unless loopback`, url.startsWith('https://') || isLoopback, url);
-    ok(`${client.id} url targets the contract MCP path`, url.endsWith(ENDPOINTS.mcp), url);
-  }
+  // Which channel this config was generated for decides what has to be true of it.
+  // Read from the config's own GENERATED note rather than from channels.json's current
+  // default: the question here is whether the COMMITTED file is coherent, and a file
+  // left behind from a channel nobody selects any more is exactly the drift worth
+  // catching.
+  const generatedFor = (raw.match(/channel: ([a-z]+)\)/) || [])[1] || null;
+  const transport = generatedFor ? transportOf(generatedFor) : null;
+  ok(`${client.id} config records which channel it was generated for`, Boolean(generatedFor), raw.slice(0, 200));
+  ok(`${client.id} was generated for a channel the contract declares`, Boolean(transport), `channel "${generatedFor}"`);
 
-  // The identity headers are what make "which client is still on the old contract"
-  // answerable. A client that does not send them is invisible in the hub's logs.
-  for (const key of ['client', 'channel', 'clientContract']) {
-    ok(`${client.id} config sends the ${HEADERS[key]} header`, raw.includes(HEADERS[key]), `missing ${HEADERS[key]}`);
+  if (transport === 'stdio') {
+    // No url and no headers, and both absences are the point: nothing is reached over a
+    // network, so there is no address to get wrong and no caller identity to send.
+    ok(`${client.id} config declares a stdio server`, /stdio|command/.test(raw), raw.slice(0, 200));
+    ok(`${client.id} config carries no url, being stdio`, !/https?:\/\//.test(raw), (raw.match(/https?:\/\/[^\s"']+/) || [])[0]);
+    ok(`${client.id} config names a command to run`, /"?command"?\s*[:=]/.test(raw), raw.slice(0, 200));
+  } else {
+    // The URL must be the resolved channel's, and https unless loopback.
+    const urlMatch = raw.match(/https?:\/\/[^\s"']+/);
+    if (ok(`${client.id} config carries a hub url`, Boolean(urlMatch), raw.slice(0, 200))) {
+      const url = urlMatch[0];
+      const isLoopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(url);
+      ok(`${client.id} url is https unless loopback`, url.startsWith('https://') || isLoopback, url);
+      ok(`${client.id} url targets the contract MCP path`, url.endsWith(ENDPOINTS.mcp), url);
+    }
+
+    // The identity headers are what make "which client is still on the old contract"
+    // answerable. A client that does not send them is invisible in the hub's logs.
+    for (const key of ['client', 'channel', 'clientContract']) {
+      ok(`${client.id} config sends the ${HEADERS[key]} header`, raw.includes(HEADERS[key]), `missing ${HEADERS[key]}`);
+    }
+    ok(`${client.id} identifies itself as "${client.id}"`, raw.includes(client.id), 'the client header must carry this client id');
   }
-  ok(`${client.id} identifies itself as "${client.id}"`, raw.includes(client.id), 'the client header must carry this client id');
 
   // --- plugin clients carry a manifest and skills -------------------------
   if (client.plugin) {
@@ -202,6 +246,59 @@ for (const client of CLIENTS) {
           if (!/^greeting_|^usdf_|^job_/.test(name)) continue;
           ok(`${client.id}/${entry.name} only references tools that exist (${name})`, TOOL_NAMES.includes(name), `${name} is not in the contract`);
         }
+      }
+    }
+
+    // --- the bundled stdio server -----------------------------------------
+    // Only when this client's config actually points at it. The three files below are
+    // what makes an install work with nothing deployed, and each fails silently in a
+    // different way: a missing server means the tools never appear, a drifted
+    // tools.json means it answers with a surface the hub does not have, and a drifted
+    // greeting.js means the same tool call returns different answers depending on
+    // which server took it.
+    if (transport === 'stdio') {
+      const serverDir = path.join(dir, 'server');
+      const entry = path.join(serverDir, 'greeting-stdio.js');
+      ok(`${client.id} ships the bundled server`, fs.existsSync(entry), entry);
+
+      if (ok(`${client.id} ships the generated tool surface`, fs.existsSync(path.join(serverDir, 'tools.json')))) {
+        const tools = readJson(path.join(serverDir, 'tools.json'), `${client.id}/server/tools.json`);
+        if (tools) {
+          equal(
+            `${client.id} bundled tools are exactly the contract's tools`,
+            (tools.tools || []).map((t) => t.name).sort(),
+            TOOL_NAMES.slice().sort()
+          );
+          equal(`${client.id} bundled tool surface is this checkout's contract`, tools.contractDigest, contractDigest());
+          equal(`${client.id} bundled tool surface is this checkout's version`, tools.contractVersion, CONTRACT_VERSION);
+          ok(
+            `${client.id} every bundled tool is declared read-only, as the contract requires`,
+            (tools.tools || []).every((t) => t.readOnly === true),
+            JSON.stringify((tools.tools || []).map((t) => [t.name, t.readOnly]))
+          );
+        }
+      }
+
+      // Byte-identical, not merely similar. The bundled server and the hub must answer
+      // the same, or "it works locally" stops being evidence about the deployed one.
+      const shipped = path.join(serverDir, 'greeting.js');
+      const canonical = path.join(REPO_ROOT, 'packages', 'hub', 'src', 'lib', 'greeting.js');
+      if (ok(`${client.id} ships the greeting logic`, fs.existsSync(shipped), shipped)) {
+        ok(
+          `${client.id} greeting logic is byte-identical to the hub's`,
+          fs.readFileSync(shipped, 'utf8') === fs.readFileSync(canonical, 'utf8'),
+          `cp packages/hub/src/lib/greeting.js ${path.relative(REPO_ROOT, shipped)}`
+        );
+      }
+
+      // A plugin gets no npm install, so a require of anything outside its own
+      // directory is a crash on someone else's machine.
+      for (const file of ['greeting-stdio.js', 'greeting.js']) {
+        const abs = path.join(serverDir, file);
+        if (!fs.existsSync(abs)) continue;
+        const requires = [...fs.readFileSync(abs, 'utf8').matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]);
+        const external = requires.filter((r) => !r.startsWith('.') && !r.startsWith('node:'));
+        ok(`${client.id} server/${file} requires nothing that needs installing`, external.length === 0, external.join(', '));
       }
     }
 

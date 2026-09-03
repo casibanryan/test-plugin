@@ -36,6 +36,43 @@ package, deploy, promote, verify. Anything that fails is a pipeline problem, whi
 what makes this repository a useful reference rather than a demo with a pipeline
 bolted on.
 
+## Two transports for one tool surface
+
+Those two tools are served two ways, and a client picks one by naming a channel:
+
+| Channel | Transport | Served by |
+| --- | --- | --- |
+| `bundled` (default) | stdio | [`packages/clients/axle/server`](../packages/clients/axle/server) — a zero-dependency server inside the plugin |
+| `local`, `dev`, `prerelease`, `production` | http | `packages/hub`, deployed |
+
+**Why bundle one at all.** A plugin whose tools live behind a URL is only as available
+as that URL. Until something is deployed — or when a free tier sleeps, or DNS is
+wrong, or a demo happens on a train — an install produces a plugin whose tools do not
+answer, which reads to a user as a broken plugin rather than a missing deployment. The
+bundled server removes that dependency for the case that does not need it.
+
+**Why keep the hub.** stdio only works where the client can start a process on the
+same machine. Anything served centrally — shared state, credentials, rate limits,
+logging, several editors on several laptops — needs the hosted path, and that is what
+the channel ladder and the deploy pipeline are for.
+
+**What stops them diverging.** Everything either server answers with is derived, not
+duplicated:
+
+- `server/greeting.js` is a **byte-identical** copy of `packages/hub/src/lib/greeting.js`.
+  `clients:verify` fails if the two differ, so a tool call cannot answer differently
+  depending on which server took it.
+- `server/tools.json` is **generated** from the contract's `TOOLS`, so the bundled
+  server cannot advertise a surface the hub does not have.
+- The bundled server may `require` nothing outside its own directory, which is checked.
+  A marketplace install copies the plugin with no `npm install`, so a dependency there
+  would be a crash on someone else's machine rather than a build failure here.
+
+The cost is a hand-rolled JSON-RPC loop instead of the MCP SDK. That is deliberate: the
+SDK and zod are 10.5 MB across 1,289 files, and vendoring them into a plugin to serve
+two pure functions would trade a small amount of protocol code for a large amount of
+someone else's.
+
 ### Why there is no authentication
 
 The hub serves data the caller just sent it. There is no tenant data, no stored record,

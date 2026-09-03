@@ -120,21 +120,54 @@ jobs:
           mkdir -p /tmp/installed
           git archive HEAD | tar -x -C /tmp/installed
           cd /tmp/installed/packages/clients/axle
-          for f in .claude-plugin/plugin.json .mcp.json skills hooks/hooks.json hooks/version-notice.js; do
+          for f in .claude-plugin/plugin.json .mcp.json skills hooks/hooks.json hooks/version-notice.js \
+                   server/greeting-stdio.js server/greeting.js server/tools.json; do
             test -e "$f" || { echo "::error::$f is missing from a clean export"; exit 1; }
           done
           node -e "
             const fs = require('fs');
             const raw = fs.readFileSync('.mcp.json', 'utf8');
             const server = Object.values(JSON.parse(raw).mcpServers)[0];
-            if (server.type !== 'http') { console.error('FAIL: not an http server'); process.exit(1); }
-            if (!/^https:\/\//.test(server.url)) { console.error('FAIL: shipped url is not https: ' + server.url); process.exit(1); }
-            // The hub is anonymous, so a shipped config must carry no credential at all.
+
+            // No credential in either shape: the tools are read-only and anonymous.
             if (/authorization/i.test(raw)) { console.error('FAIL: an Authorization header was shipped'); process.exit(1); }
             const suspicious = raw.match(/\b[A-Za-z0-9_-]{32,}\b/g) || [];
             if (suspicious.length) { console.error('FAIL: something token-shaped was shipped: ' + suspicious[0]); process.exit(1); }
-            console.log('ok  a clean install points at ' + server.url + ', with no credential');
+
+            if (server.type === 'stdio') {
+              // The install directory is version-stamped, so an absolute path here
+              // would work for exactly one release.
+              const args = server.args || [];
+              if (!server.command) { console.error('FAIL: a stdio server with no command'); process.exit(1); }
+              if (!args.length) { console.error('FAIL: a stdio server with no args'); process.exit(1); }
+              if (!args.some(a => a.includes('CLAUDE_PLUGIN_ROOT'))) {
+                console.error('FAIL: the stdio server is not located through CLAUDE_PLUGIN_ROOT: ' + JSON.stringify(args));
+                process.exit(1);
+              }
+              if (/https?:\/\//.test(raw)) { console.error('FAIL: a stdio config should carry no url'); process.exit(1); }
+              console.log('ok  a clean install runs ' + server.command + ' ' + args.join(' ') + ', with no credential');
+            } else if (server.type === 'http') {
+              if (!/^https:\/\//.test(server.url)) { console.error('FAIL: shipped url is not https: ' + server.url); process.exit(1); }
+              console.log('ok  a clean install points at ' + server.url + ', with no credential');
+            } else {
+              console.error('FAIL: unknown server type ' + server.type); process.exit(1);
+            }
           "
+
+          # The bundled server has to run from the exported tree with no npm install,
+          # which is the one thing a file-presence check cannot tell you.
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"greeting_hello","arguments":{"name":"CI","hour":9}}}' \
+            | node server/greeting-stdio.js \
+            | node -e "
+              let s=''; process.stdin.on('data',d=>s+=d).on('end',()=>{
+                const m = JSON.parse(s.trim().split('\n')[0]);
+                if (m.result && m.result.isError) { console.error('FAIL: the bundled server refused a valid call: ' + m.result.content[0].text); process.exit(1); }
+                if (!m.result || !m.result.structuredContent || m.result.structuredContent.ok !== true) {
+                  console.error('FAIL: the bundled server did not answer: ' + s); process.exit(1);
+                }
+                console.log('ok  the bundled server answers from a clean export: ' + JSON.stringify(m.result.structuredContent.message));
+              });
+            "
 
   # ---------------------------------------------------------------------------
   # The deployable artifact, built and then tested FROM THE ARTIFACT — not from the

@@ -81,9 +81,19 @@ try {
   // Which hub this build was generated against. Read rather than assumed: a config
   // pointing at dev while the user believes they are on production is exactly the kind
   // of thing worth having on screen during a demo.
+  //
+  // Two places to look, because the two transports carry it differently. An http
+  // config sends the channel as a request header; a stdio config has no headers at all
+  // — there is no request — so it comes from the GENERATED note that every generated
+  // config carries.
   const mcp = readJson(path.join(PLUGIN_ROOT, '.mcp.json'));
   const server = mcp && mcp.mcpServers && Object.values(mcp.mcpServers)[0];
-  const channel = (server && server.headers && server.headers['x-pivotly-channel']) || 'unknown';
+  const fromHeader = server && server.headers && server.headers['x-pivotly-channel'];
+  const fromNote = ((mcp && mcp._comment) || '').match(/channel: ([a-z]+)\)/);
+  const channel = fromHeader || (fromNote && fromNote[1]) || 'unknown';
+  // `bundled` means the tools come from a process inside this very directory, so it
+  // reads better without the word "channel": there is no remote thing to be down.
+  const where = channel === 'bundled' ? 'bundled tools' : `${channel} channel`;
 
   const previous = readJson(STATE_FILE);
   const seen = previous && previous.version;
@@ -97,14 +107,14 @@ try {
 
   // The line the greeting appends. One line, past tense, facts only — version, when it
   // landed, which hub it talks to, and the commit if we have it.
-  const banner = `Axle plugin updated — v${version} · ${when}${commit ? ` · ${commit}` : ''} · ${channel} channel`;
+  const banner = `Axle plugin updated — v${version} · ${when}${commit ? ` · ${commit}` : ''} · ${where}`;
 
   const context = [
     `Axle plugin status, from the plugin's own SessionStart hook:`,
     `  version: ${version}`,
     `  updated on this machine: ${when}`,
     commit ? `  marketplace commit: ${commit}` : null,
-    `  hub channel: ${channel}`,
+    `  tools served by: ${where}`,
     changed ? `  changed since the last session: yes, was v${seen}` : `  changed since the last session: no`,
     ``,
     `When you greet the user — the axle greeting skill — end the greeting with exactly`,

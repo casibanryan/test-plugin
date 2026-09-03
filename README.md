@@ -1,19 +1,30 @@
 # pivotly-ai
 
-A working reference for shipping an MCP server and its clients: a stateless MCP hub on
-Azure App Service, two generated clients, and a shared contract that makes a change to
-one fail loudly in the others.
+A working reference for shipping an MCP server and its clients: a stateless MCP hub,
+two generated clients, and a shared contract that makes a change to one fail loudly in
+the others.
 
-The hub does something deliberately trivial — it says hello and asks how your day is
+The tools do something deliberately trivial — they say hello and ask how your day is
 going. Everything else is **pipeline**, which is the part worth reading.
+
+**The same two tools are served two ways**, and that is the interesting part:
+
+| | |
+|---|---|
+| **bundled** (the default) | a zero-dependency stdio server that ships *inside* the Claude Code plugin. Install it and the tools answer — offline, with no host, no account and no token. |
+| **hosted** | the hub, deployed behind an https URL, with the channel ladder, health checks and logging that a service needs. |
+
+One contract, one greeting implementation, two transports. Which one a client gets is a
+line in the channel manifest, not a fork in the code — so a plugin keeps working when
+nothing is deployed, and the hosted path stays available for when something is.
 
 ## The three workspaces
 
 | Workspace | What it is |
 | --- | --- |
 | [`packages/contract`](packages/contract) | the single source of truth — tool schemas, error codes, protocol, channels, and the list of clients. Imports nothing from its siblings. |
-| [`packages/hub`](packages/hub) | the MCP server. Stateless, anonymous, no database, no upstream. |
-| [`packages/clients`](packages/clients) | every client, **generated** from one channel manifest: `axle` (Claude Code plugin) and `codex` (Codex CLI). |
+| [`packages/hub`](packages/hub) | the hosted MCP server. Stateless, anonymous, no database, no upstream. |
+| [`packages/clients`](packages/clients) | every client, **generated** from one channel manifest: `axle` (Claude Code plugin) and `codex` (Codex CLI). `axle` also carries the bundled stdio server in [`axle/server`](packages/clients/axle/server). |
 
 Reasoning behind each decision: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
@@ -23,9 +34,12 @@ Reasoning behind each decision: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 requests. Two read-only tools computed from the arguments in the same request. A deploy
 is a process restart; there is nothing to migrate and nothing to lose.
 
-**Every client is generated.** A channel URL exists in exactly one place. Repointing
-every client at `dev` is one command, hand-edits fail CI, and two clients cannot
-disagree about the tool surface — they are the same data through different writers.
+**Every client is generated.** A channel's address exists in exactly one place.
+Repointing every client at `dev` is one command, hand-edits fail CI, and two clients
+cannot disagree about the tool surface — they are the same data through different
+writers. That now covers the transport too: `--channel=bundled` emits a stdio server,
+`--channel=production` emits an https URL, and the bundled server's own tool surface is
+generated from the same contract rather than hand-maintained beside it.
 
 ### There is no authentication, on purpose
 
@@ -45,6 +59,14 @@ No digest, no lock, no CI pass, no artifact. The day a tool needs real data, the
 stops and auth stops being optional.
 
 ## Try it
+
+The bundled server needs no install and no server — just pipe a call into it:
+
+```sh
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"greeting_hello","arguments":{"name":"you","hour":9}}}'   | node packages/clients/axle/server/greeting-stdio.js
+```
+
+Or run the hosted hub:
 
 ```sh
 npm ci
@@ -106,7 +128,7 @@ Switch back to `production` before committing — CI fails on the drift, by desi
 
 ## The channel ladder
 
-Four channels, **three different triggers**, which is the point of having four:
+Five channels. `bundled` needs no deploy at all; the other four are **three different triggers**, which is the point of having them:
 
 ```
 push to main   ──►  dev          no gate, deploys every merge

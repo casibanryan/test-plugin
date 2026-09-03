@@ -183,24 +183,72 @@ function simulateMarketplaceInstall() {
   // The same list _verify.yml checks. The hooks are in it because the version notice
   // is the only thing that tells a user their plugin moved, and a hook file left out
   // of the export fails silently — the plugin installs, and simply never speaks.
-  for (const rel of ['.claude-plugin/plugin.json', '.mcp.json', 'skills', 'hooks/hooks.json', 'hooks/version-notice.js']) {
+  for (const rel of [
+    '.claude-plugin/plugin.json',
+    '.mcp.json',
+    'skills',
+    'hooks/hooks.json',
+    'hooks/version-notice.js',
+    // The bundled server. Without these three the plugin installs cleanly and simply
+    // has no tools, which is the worst kind of failure: silent.
+    'server/greeting-stdio.js',
+    'server/greeting.js',
+    'server/tools.json',
+  ]) {
     if (!fs.existsSync(path.join(pluginDir, rel))) problems.push(`${rel} is missing from a clean export`);
   }
 
+  let summary = '';
   if (!problems.length) {
-    const mcp = JSON.parse(fs.readFileSync(path.join(pluginDir, '.mcp.json'), 'utf8'));
-    const server = Object.values(mcp.mcpServers)[0];
-    if (server.type !== 'http') problems.push(`the shipped server is "${server.type}", not http`);
-    if (!/^https:\/\//.test(server.url)) problems.push(`the shipped url is not https: ${server.url}`);
-
-    // The hub is anonymous, so a shipped config must carry NO credential at all —
-    // neither a literal one nor a placeholder implying the user should find one.
     const raw = fs.readFileSync(path.join(pluginDir, '.mcp.json'), 'utf8');
-    if (/authorization/i.test(raw)) problems.push('the shipped config declares an Authorization header, but the hub is anonymous');
+    const server = Object.values(JSON.parse(raw).mcpServers)[0];
+
+    // The tools are read-only and anonymous, so a shipped config must carry NO
+    // credential at all — neither a literal one nor a placeholder implying the user
+    // should go and find one.
+    if (/authorization/i.test(raw)) problems.push('the shipped config declares an Authorization header, but the tools are anonymous');
     const suspicious = raw.match(/\b[A-Za-z0-9_-]{32,}\b/g) || [];
     if (suspicious.length) problems.push(`the shipped config contains something token-shaped: ${suspicious.slice(0, 2).join(', ')}`);
 
-    if (!problems.length) return { code: 0, out: `ok    a clean install points at ${server.url}, with no credential` };
+    if (server.type === 'stdio') {
+      const args = server.args || [];
+      if (!server.command) problems.push('a stdio server with no command');
+      if (!args.length) problems.push('a stdio server with no args');
+      // The install directory is version-stamped, so an absolute path would work for
+      // exactly one release.
+      if (!args.some((a) => String(a).includes('CLAUDE_PLUGIN_ROOT'))) {
+        problems.push(`the stdio server is not located through CLAUDE_PLUGIN_ROOT: ${JSON.stringify(args)}`);
+      }
+      if (/https?:\/\//.test(raw)) problems.push('a stdio config should carry no url');
+      summary = `ok    a clean install runs ${server.command} ${args.join(' ')}, with no credential`;
+    } else if (server.type === 'http') {
+      if (!/^https:\/\//.test(server.url)) problems.push(`the shipped url is not https: ${server.url}`);
+      summary = `ok    a clean install points at ${server.url}, with no credential`;
+    } else {
+      problems.push(`the shipped server declares an unknown type: ${server.type}`);
+    }
+
+    // Presence is not enough: the bundled server has to actually run from the exported
+    // tree, with no npm install and nothing on the path but node.
+    if (!problems.length && server.type === 'stdio') {
+      const call = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'greeting_hello', arguments: { name: 'ci-local', hour: 9 } } };
+      const probe = spawnSync(process.execPath, [path.join(pluginDir, 'server', 'greeting-stdio.js')], {
+        input: `${JSON.stringify(call)}\n`,
+        encoding: 'utf8',
+      });
+      try {
+        const message = JSON.parse((probe.stdout || '').trim().split('\n')[0]);
+        if (!message.result || !message.result.structuredContent || message.result.structuredContent.ok !== true) {
+          problems.push(`the bundled server did not answer from a clean export: ${probe.stdout || probe.stderr}`);
+        } else {
+          summary += `\n        ok    it answers: ${JSON.stringify(message.result.structuredContent.message)}`;
+        }
+      } catch (err) {
+        problems.push(`the bundled server produced no parseable response: ${probe.stdout || probe.stderr || err.message}`);
+      }
+    }
+
+    if (!problems.length) return { code: 0, out: summary };
   }
 
   return { code: 1, out: problems.map((p) => `FAIL  ${p}`).join('\n') };
