@@ -4,25 +4,36 @@
 > dev slot, the prerelease slot, the approval gate, the swap into production, the
 > rollback, and every secret and variable they need — describes the pipeline preserved
 > on the **`with-azure`** branch, and is what comes back when that `cd.yml` is
-> restored. What `cd.yml` does on this branch is narrower and needs no cloud at all:
+> restored. What runs on this branch is narrower, needs no cloud at all, and is split
+> one workflow per trigger — so every job in every run actually runs, and a green run
+> is green all the way across rather than green with three skips.
 >
-> | Trigger | Does |
-> | --- | --- |
-> | push to `main` | `_verify.yml`, then reports the plugin version main now serves |
-> | manual, `bump` = patch/minor/major | `npm run version:bump`, verifies the bumped tree, pushes it to `main` — the button that makes an installed plugin see an update |
-> | tag `v*.*.*` | `_verify.yml`, then publishes the GitHub release |
+> | Workflow | Trigger | Does |
+> | --- | --- | --- |
+> | [`cd.yml`](../.github/workflows/cd.yml) | push to `main` | `_verify.yml`, then reports the plugin version main now serves |
+> | [`bump.yml`](../.github/workflows/bump.yml) | manual | `npm run version:bump`, verifies the bumped tree, pushes it — **the button that makes an installed plugin see an update** |
+> | [`release.yml`](../.github/workflows/release.yml) | tag `v*.*.*` | `_verify.yml` with the tag, then publishes the GitHub release |
 >
 > Nothing is deployed, so the client configs still point at a production URL that will
 > not answer, and `channels.json` keeps the `lastVerified` records it has — a run that
 > deploys nothing may not claim a channel was verified.
 
-Two workflows and one shared definition of "is this good".
+One shared definition of "is this good", called by every workflow that has an
+opinion about whether the tree is shippable.
 
 | File | Runs on | Does |
 | --- | --- | --- |
-| [`_verify.yml`](../.github/workflows/_verify.yml) | called by both | everything provable without a deployed environment |
+| [`_verify.yml`](../.github/workflows/_verify.yml) | called by all of the below | everything provable without a deployed environment |
 | [`ci.yml`](../.github/workflows/ci.yml) | every PR, push to `main` | calls `_verify.yml`; needs no cloud credentials |
-| [`cd.yml`](../.github/workflows/cd.yml) | push to `main`, `v*.*.*` tags, manual | the channel ladder |
+| [`cd.yml`](../.github/workflows/cd.yml) | push to `main` | verify, then report what main serves |
+| [`bump.yml`](../.github/workflows/bump.yml) | manual | verify, bump every version, verify again, push |
+| [`release.yml`](../.github/workflows/release.yml) | `v*.*.*` tags | verify against the tag, then publish |
+
+Every job runs on Node 22 and 24. Node 20 is end-of-life and its action runtime is
+deprecated on the runners, so every action is pinned to a major that declares
+`using: node24` — `checkout@v7`, `setup-node@v7`, `upload-artifact@v7`,
+`action-gh-release@v3`. Those major numbers do not move together across repos, so
+check each one against its own `action.yml` rather than assuming.
 
 CD calls `_verify.yml` again rather than trusting CI. A tag is permanent and
 installable, and may point at a commit whose CI run predates a change to the workflow.
@@ -54,7 +65,7 @@ Each rung also advances its **own channel pin** after verification, and commits 
 ## `_verify.yml` — the offline gate
 
 ```
-contract ──┬── unit (Node 20, 22)  ──┬── e2e-local
+contract ──┬── unit (Node 22, 24)  ──┬── e2e-local
            ├── clients              ─┘
            └── artifact  ─► uploads hub-<sha>
 ```
@@ -62,7 +73,7 @@ contract ──┬── unit (Node 20, 22)  ──┬── e2e-local
 | Job | What it proves |
 | --- | --- |
 | `contract` | the committed digest matches the source; every version **and every channel pin** agrees; the contract's own self-tests pass |
-| `unit` | all workspace tests on Node 20 **and** 22 — 20 is the declared `engines` floor, 22 is what runs deployed |
+| `unit` | all workspace tests on Node 22 **and** 24 — 22 is the oldest still supported on the runners, 24 is what every action's own runtime uses. The `>=20.18.0` floor in `package.json` is no longer covered by anything: Node 20 is end-of-life, so either raise the floor or accept the gap knowingly |
 | `clients` | `claude plugin validate` passes; every declared client's config, channel pins and skills are valid; nothing has drifted from the manifest; and a `git archive` export — exactly what a marketplace install copies — yields a working plugin with an `https` URL and **no credential** |
 | `artifact` | `npm audit --omit=dev --audit-level=high`; the artifact builds; tests and clients are **not** in it; and it boots and self-tests **from the packaged tree** with no configuration |
 | `e2e-local` | all three tiers against a hub the suite starts itself |
