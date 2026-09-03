@@ -1,14 +1,12 @@
 {
-  "_comment": "Project-scoped MCP config for working ON this repo — NOT the config the Axle plugin ships. That one is generated at packages/clients/axle/.mcp.json by `npm run clients:generate`. This one points at a hub on your own machine: run `npm run dev:hub` and reload. No token: the hub is anonymous.",
+  "_comment": "Project-scoped MCP config for working ON this repo — NOT the config the Axle plugin ships. That one is generated at packages/clients/axle/.mcp.json by `npm run clients:generate`. This one spawns the SAME bundled server the plugin ships, over stdio, so working on the repo needs no port, no host and no deploy. To develop against a real hub instead, run `npm run dev:hub` and swap this entry for the `local` channel in packages/clients/channels.json (http://127.0.0.1:8787/mcp, anonymous).",
   "mcpServers": {
-    "pivotly-hub-local": {
-      "type": "http",
-      "url": "http://127.0.0.1:8787/mcp",
-      "headers": {
-        "x-pivotly-client": "repo-dev",
-        "x-pivotly-channel": "local",
-        "x-pivotly-contract": "0.3.0"
-      }
+    "pivotly-greeting": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "packages/clients/axle/server/greeting-stdio.js"
+      ]
     }
   }
 }
