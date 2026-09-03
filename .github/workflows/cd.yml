@@ -1,26 +1,30 @@
 # .github/workflows/cd.yml
 #
-# The channel ladder. One workflow, three rungs, three different triggers — which is
-# the whole point of having four channels rather than one environment.
+# NO-AZURE MODE. This is the demo pipeline: it verifies the repo and publishes the
+# PLUGIN, and it touches no cloud at all. The full channel ladder — dev slot,
+# prerelease slot, approval gate, slot swap into production, rollback — is preserved
+# verbatim on the `with-azure` branch, and comes back by restoring that file.
 #
-#   push to main   ──► dev          no gate. Redeployed continuously, so there is always
-#                                   something live and newer than the last release.
-#   tag v*.*.*     ──► prerelease   fully verified, then held at an approval.
-#                  ──► production   a slot swap from prerelease, then verified again.
+# What is left is the half that actually reaches a user's machine:
 #
-#   local                           your machine; never touched by this workflow.
+#   push to main              verify, then report what version main now serves. A
+#                             client whose marketplace tracks main picks that up on
+#                             its next refresh.
+#   workflow_dispatch (bump)  bump every version string in lockstep, verify the
+#                             result, push it to main. This is the button that makes
+#                             an installed plugin update, because Claude Code decides
+#                             an update exists by comparing marketplace.json's version
+#                             against the one it has cached.
+#   tag v*.*.*                verify, then publish the GitHub release.
 #
-# What each rung buys:
+# Removed along with Azure, deliberately, because each one needs a live hub to read:
 #
-#   dev         catches "it works on my laptop but not on App Service" within minutes
-#               of merging, with zero blast radius and nobody's approval.
-#   prerelease  a full copy of what production is about to become, verified by the same
-#               script that will verify production. If it fails, nothing has moved.
-#   production  a swap, not a redeploy: the instances that just passed every check are
-#               the ones that start taking traffic, already warm — and the previous
-#               build lands in the slot as the rollback.
-#
-# Required secrets and variables are listed in docs/PIPELINE.md.
+#   * every deploy, slot swap and rollback step
+#   * `clients:sync-pin`, which reads the channel's /version — so channels.json keeps
+#     the lastVerified records it has rather than being advanced by a run that
+#     deployed nothing
+#   * the e2e tiers against a deployed URL. Tiers 1-3 still run in _verify.yml,
+#     against a hub the suite starts itself.
 
 name: CD
 
@@ -30,18 +34,12 @@ on:
     tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
-      channel:
-        description: Which rung to deploy to.
+      bump:
+        description: Bump every version in lockstep and push to main — this is what makes an installed plugin see an update.
         type: choice
-        options: [dev, prerelease]
-        default: dev
-      skip-promotion:
-        description: For a tag run — deploy and verify prerelease, but do not swap into production.
-        type: boolean
-        default: false
+        options: [none, patch, minor, major]
+        default: none
 
-# Never cancel a deploy in flight: cancelling between a slot deploy and a swap leaves
-# the two halves inconsistent with nothing to say so.
 concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: false
@@ -51,6 +49,8 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # The same checks CI runs, from one definition rather than two that drift. Needs no
+  # cloud credentials at all, which is exactly why it survives Azure being removed.
   verify:
     name: Verify
     uses: ./.github/workflows/_verify.yml
@@ -58,364 +58,20 @@ jobs:
       tag: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
   # ===========================================================================
-  # RUNG 1 — dev. Every push to main, no gate.
+  # The version bump. Manual on purpose: a job that bumped on every push to main
+  # would push a commit that triggers itself.
   # ===========================================================================
-  deploy-dev:
-    name: Deploy to dev
+  bump:
+    name: Bump the version and push to main
     runs-on: ubuntu-latest
     needs: verify
-    if: ${{ github.ref_type != 'tag' }}
-    environment:
-      name: dev
-      url: ${{ vars.HUB_DEV_URL }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.bump != 'none' }}
     permissions:
-      contents: read
-      id-token: write # OIDC federated login to Azure — no stored client secret
-    steps:
-      # The artifact built and scanned by verify, byte for byte. Rebuilding here would
-      # mean deploying something that was never the thing that passed.
-      - uses: actions/download-artifact@v4
-        with:
-          name: hub-${{ github.sha }}
-          path: dist/hub
-
-      - name: Log in to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # Settings before the deploy, so new code never starts against the previous
-      # configuration. HUB_CHANNEL is what the hub reports on /version, and the smoke
-      # test asserts it — a slot serving the wrong channel name is a real failure mode.
-      - name: Configure the dev slot
-        run: |
-          az webapp config appsettings set \
-            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
-            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
-            --slot dev \
-            --settings \
-              HUB_CHANNEL=dev \
-              HUB_MODE=http \
-              HUB_LOG_LEVEL=info \
-              BUILD_COMMIT='${{ github.sha }}' \
-              BUILD_TIMESTAMP='${{ github.event.head_commit.timestamp }}' \
-              WEBSITES_PORT=8787 \
-              SCM_DO_BUILD_DURING_DEPLOYMENT=false \
-            --output none
-
-          # startup.sh ships inside the artifact, so the start command is versioned with
-          # the code it starts rather than living in a portal field nobody diffs.
-          az webapp config set \
-            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
-            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
-            --slot dev \
-            --startup-file 'startup.sh' \
-            --output none
-
-      - uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
-          slot-name: dev
-          package: dist/hub
-
-      - name: Wait for dev to serve this commit
-        env:
-          HUB_URL: ${{ vars.HUB_DEV_URL }}
-        run: |
-          set -u
-          for attempt in $(seq 1 40); do
-            commit=$(curl -fsS --max-time 10 "$HUB_URL/version" | node -e "
-              let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).commit||'')}catch{process.stdout.write('')}})
-            " || true)
-            ready=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$HUB_URL/readyz" || true)
-            if [ "$commit" = "${{ github.sha }}" ] && [ "$ready" = "200" ]; then
-              echo "ok  dev serves ${{ github.sha }} and reports ready"
-              exit 0
-            fi
-            echo "attempt $attempt/40: commit=${commit:-none} readyz=${ready:-none}"
-            sleep 10
-          done
-          echo '::error::dev never reported this commit as ready'
-          curl -s --max-time 10 "$HUB_URL/readyz" || true
-          exit 1
-
-  verify-dev:
-    name: Verify dev
-    runs-on: ubuntu-latest
-    needs: deploy-dev
-    environment:
-      name: dev
-      url: ${{ vars.HUB_DEV_URL }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-
-      # The same tiers, against the deployed dev channel. Tier 3 is the one that matters
-      # here: it proves the clients' `dev` pin still matches what dev is serving.
-      - name: Tiers 2 and 3 against dev
-        run: npm run e2e -- --tiers=2,3 --hub-url='${{ vars.HUB_DEV_URL }}' --channel=dev --expect-commit='${{ github.sha }}'
-
-      # dev moves on every merge, so its pin moves with it. Committed back to main so
-      # anyone pointing a client at dev gets a manifest that matches reality.
-      - name: Advance the dev channel pin
-        run: npm run clients:sync-pin -- --channel=dev
-
-      - name: Commit the dev pin if it moved
-        run: |
-          if git diff --quiet -- packages/clients; then
-            echo 'ok  the dev pin was already current; nothing to commit'
-            exit 0
-          fi
-          git config user.name 'pivotly-ci'
-          git config user.email 'ci@pivotly.com'
-          git add packages/clients
-          git commit \
-            -m 'chore(clients): pin dev channel to the verified deploy' \
-            -m 'Advanced by CD after ${{ github.sha }} passed dev verification.'
-          git push origin HEAD:main
-
-  # ===========================================================================
-  # RUNG 2 — prerelease. On a version tag. Fully verified, then gated.
-  # ===========================================================================
-  deploy-prerelease:
-    name: Deploy to the pre-release slot
-    runs-on: ubuntu-latest
-    needs: verify
-    if: ${{ github.ref_type == 'tag' || github.event.inputs.channel == 'prerelease' }}
-    environment:
-      name: prerelease
-      url: ${{ vars.HUB_PRERELEASE_URL }}
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: hub-${{ github.sha }}
-          path: dist/hub
-
-      - name: Log in to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Configure the prerelease slot
-        run: |
-          az webapp config appsettings set \
-            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
-            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
-            --slot prerelease \
-            --settings \
-              HUB_CHANNEL=prerelease \
-              HUB_MODE=http \
-              HUB_LOG_LEVEL=info \
-              BUILD_COMMIT='${{ github.sha }}' \
-              BUILD_TIMESTAMP='${{ github.event.repository.updated_at }}' \
-              WEBSITES_PORT=8787 \
-              SCM_DO_BUILD_DURING_DEPLOYMENT=false \
-            --output none
-
-          az webapp config set \
-            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
-            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
-            --slot prerelease \
-            --startup-file 'startup.sh' \
-            --output none
-
-      - uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
-          slot-name: prerelease
-          package: dist/hub
-
-      # Do not trust the deploy API's success. An instance can be up, serving the
-      # previous build, and answer 200 on /healthz the whole time.
-      - name: Wait for the slot to serve this commit
-        env:
-          HUB_URL: ${{ vars.HUB_PRERELEASE_URL }}
-        run: |
-          set -u
-          for attempt in $(seq 1 40); do
-            commit=$(curl -fsS --max-time 10 "$HUB_URL/version" | node -e "
-              let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).commit||'')}catch{process.stdout.write('')}})
-            " || true)
-            ready=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$HUB_URL/readyz" || true)
-            if [ "$commit" = "${{ github.sha }}" ] && [ "$ready" = "200" ]; then
-              echo "ok  the slot serves ${{ github.sha }} and reports ready"
-              exit 0
-            fi
-            echo "attempt $attempt/40: commit=${commit:-none} readyz=${ready:-none}"
-            sleep 10
-          done
-          echo '::error::the pre-release slot never reported this commit as ready'
-          curl -s --max-time 10 "$HUB_URL/readyz" || true
-          exit 1
-
-  # The gate. Everything below this is hard to reverse; everything above is invisible
-  # to production.
-  verify-prerelease:
-    name: Verify the pre-release slot
-    runs-on: ubuntu-latest
-    needs: deploy-prerelease
-    environment:
-      name: prerelease
-      url: ${{ vars.HUB_PRERELEASE_URL }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-
-      - name: All three tiers against the deployed slot
-        run: npm run e2e -- --hub-url='${{ vars.HUB_PRERELEASE_URL }}' --channel=prerelease --expect-commit='${{ github.sha }}'
-
-      # The check that would have caught the original cascade: the clients' prerelease
-      # pin must match what the slot serves. If it does not, promoting would put a
-      # surface into production that no shipped client was generated against.
-      - name: The client configs match the slot
-        run: npm run clients:check -- --channel=prerelease
-
-  # ===========================================================================
-  # RUNG 3 — production. An approval, then a slot swap.
-  # ===========================================================================
-  promote:
-    name: Swap into production
-    runs-on: ubuntu-latest
-    needs: verify-prerelease
-    if: ${{ github.ref_type == 'tag' && github.event.inputs.skip-promotion != 'true' }}
-    environment:
-      # Add a required reviewer to this environment in repository settings to make
-      # promotion a human decision. The gate belongs here and not earlier: everything
-      # before this point is reversible without anyone noticing.
-      name: production
-      url: ${{ vars.HUB_PRODUCTION_URL }}
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Log in to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # App Service swaps slot settings along with the slot unless they are marked
-      # sticky. So HUB_CHANNEL has to be set to `production` on the thing that is about
-      # to BECOME production — otherwise production comes up reporting `prerelease`,
-      # and the post-swap smoke test catches it after the fact instead of before.
-      - name: Set the production channel on the slot before swapping
-        run: |
-          az webapp config appsettings set \
-            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
-            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
-            --slot prerelease \
-            --settings HUB_CHANNEL=production \
-            --output none
-
-          for attempt in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 '${{ vars.HUB_PRERELEASE_URL }}/readyz' || true)
-            [ "$code" = "200" ] && { echo 'ok  the slot is ready on production settings'; break; }
-            echo "attempt $attempt/30: readyz=${code:-none}"
-            sleep 10
-            [ "$attempt" = "30" ] && { echo '::error::the slot did not become ready on production settings'; exit 1; }
-          done
-
-      - name: Swap the slot into production
-        run: |
-          az webapp deployment slot swap \
-            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
-            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
-            --slot prerelease \
-            --target-slot production \
-            --output none
-          echo 'ok  swapped; the previous production build is now in the prerelease slot'
-
-  verify-production:
-    name: Verify production
-    runs-on: ubuntu-latest
-    needs: promote
-    environment:
-      name: production
-      url: ${{ vars.HUB_PRODUCTION_URL }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-
-      - name: All three tiers against production
-        run: npm run e2e -- --hub-url='${{ vars.HUB_PRODUCTION_URL }}' --channel=production --expect-commit='${{ github.sha }}'
-
-  # Runs only if production verification failed AFTER a successful swap — the one
-  # situation where production is serving a build just shown to be bad. Swapping back is
-  # seconds, because the previous build is still running in the slot.
-  rollback:
-    name: Roll back the swap
-    runs-on: ubuntu-latest
-    needs: [promote, verify-production]
-    if: ${{ always() && needs.promote.result == 'success' && needs.verify-production.result == 'failure' }}
-    environment:
-      name: production
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Log in to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Swap back
-        run: |
-          az webapp deployment slot swap \
-            --resource-group '${{ vars.AZURE_RESOURCE_GROUP }}' \
-            --name '${{ vars.AZURE_WEBAPP_NAME }}' \
-            --slot prerelease \
-            --target-slot production \
-            --output none
-          echo '::warning::production verification failed after the swap; rolled back to the previous build'
-
-      - name: Confirm the rollback is serving
-        run: |
-          for attempt in $(seq 1 20); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 '${{ vars.HUB_PRODUCTION_URL }}/readyz' || true)
-            [ "$code" = "200" ] && { echo 'ok  production is ready again'; exit 0; }
-            sleep 5
-          done
-          echo '::error::production is not ready after the rollback — this needs a human'
-          exit 1
-
-  # ===========================================================================
-  # The clients' half of the release. Last, deliberately: the pin records what
-  # production is VERIFIED to be serving, so it can never point at a build that was
-  # deployed and then rolled back.
-  # ===========================================================================
-  sync-clients:
-    name: Sync the client configs and publish the release
-    runs-on: ubuntu-latest
-    needs: verify-production
-    permissions:
-      contents: write # to commit the pin and create the release
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          # The default checkout is detached at the tag; the pin has to land on a branch
-          # to be of any use to anyone.
+          # It has to land on a branch to be of use to anyone.
           ref: main
           fetch-depth: 0
       - uses: actions/setup-node@v4
@@ -424,50 +80,119 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # Reads production's /version and advances the pin to the digest it is actually
-      # serving, then regenerates EVERY client config from it. Refuses if that digest is
-      # not the one this checkout builds, so a mid-rollout state cannot be recorded.
-      - name: Advance the production pin and regenerate every client
-        run: npm run clients:sync-pin -- --channel=production
+      # One script owns every version string — nine files, including the contract
+      # digest and the client configs generated from it. Bumping by hand is the exact
+      # drift versions:verify exists to catch, so it is not done by hand here either.
+      - name: Bump every version in lockstep
+        run: npm run version:bump -- ${{ github.event.inputs.bump }}
 
-      - name: Commit if anything moved
+      # The bumped tree is a tree no run has ever seen: the push below is made with
+      # GITHUB_TOKEN and so deliberately triggers no workflow. Verify it here, or it
+      # reaches a user's machine unverified.
+      - name: The bumped tree still passes everything
+        run: npm run verify:all
+
+      - name: Commit the bump
         run: |
-          if git diff --quiet -- packages/clients; then
-            echo 'ok  the client configs were already current; nothing to commit'
-            exit 0
+          version=$(node -p "require('./package.json').version")
+          if git diff --quiet; then
+            echo "::error::nothing changed — the tree is already at $version"
+            exit 1
           fi
           git config user.name 'pivotly-ci'
           git config user.email 'ci@pivotly.com'
-          git add packages/clients
-          git commit \
-            -m 'chore(clients): pin production channel to the verified deploy' \
-            -m 'Advanced by CD after ${{ github.sha }} passed production verification. Every client config regenerated from the pin.'
+          git commit -a \
+            -m "chore(release): $version" \
+            -m 'Every package, the contract digest, the plugin manifest, the marketplace entry and every generated client config, bumped together by CD.'
           git push origin HEAD:main
+          echo "PLUGIN_VERSION=$version" >> "$GITHUB_ENV"
 
-      - name: Re-verify the clients after the pin moved
+      - name: Say what an installed client will see
         run: |
-          npm run versions:verify
-          npm run clients:verify
-          npm run clients:check -- --channel=production
+          {
+            echo "### axle $PLUGIN_VERSION is now on main"
+            echo ""
+            echo "A client whose marketplace tracks main updates on its next refresh:"
+            echo ""
+            echo '    /plugin marketplace update Test-Plugin'
+            echo ""
+            echo 'Or on its own at startup, with `"autoUpdate": true` on the marketplace'
+            echo 'entry in `~/.claude/settings.json`.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish the release
-        if: ${{ github.ref_type == 'tag' }}
-        uses: softprops/action-gh-release@v2
+  # ===========================================================================
+  # What main serves right now. No deploy and no gate — just the record of what a
+  # marketplace refresh would hand a user, so a green run says something checkable.
+  # ===========================================================================
+  live:
+    name: Report what main serves
+    runs-on: ubuntu-latest
+    needs: verify
+    # `inputs.bump` is null on a push, and a null never equals a string in a GitHub
+    # expression — so the event has to be tested before the input, or this job would
+    # silently skip on every push, which is the one case it exists for.
+    if: ${{ github.ref_type != 'tag' && (github.event_name != 'workflow_dispatch' || github.event.inputs.bump == 'none') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The plugin version on main
+        run: |
+          set -u
+          marketplace=$(node -p "require('./.claude-plugin/marketplace.json').plugins.find(p => p.name === 'axle').version")
+          plugin=$(node -p "require('./packages/clients/axle/.claude-plugin/plugin.json').version")
+
+          # versions:verify already asserted this in the verify job. Repeated because
+          # this is the one number a user's client compares, and a summary quoting a
+          # number that nothing checked would be worse than no summary.
+          if [ "$marketplace" != "$plugin" ]; then
+            echo "::error::marketplace.json says $marketplace, plugin.json says $plugin"
+            exit 1
+          fi
+
+          {
+            echo "### axle $plugin"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| version | \`$plugin\` |"
+            echo "| commit | \`${GITHUB_SHA:0:12}\` |"
+            echo "| channel the shipped config points at | \`production\` |"
+            echo ""
+            echo "Clients tracking main get this on their next marketplace refresh. The hub"
+            echo "itself is not deployed in no-Azure mode, so its tools will not answer."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "ok  main serves axle $plugin at ${GITHUB_SHA:0:12}"
+
+  # ===========================================================================
+  # The release. On a tag only — verify has already asserted that the tag and the
+  # repo version agree.
+  # ===========================================================================
+  release:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    needs: verify
+    if: ${{ github.ref_type == 'tag' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           body: |
-            The Pivotly hub is deployed and verified on the production channel, and every
-            client config is pinned to the contract it is serving.
+            The Axle plugin is verified and published at `${{ github.ref_name }}`.
 
             **Claude Code**
 
             ```
-            /plugin marketplace add ${{ github.repository }}@${{ github.ref_name }}
-            /plugin install axle@pivotly
+            /plugin marketplace add ${{ github.repository }}
+            /plugin install axle@Test-Plugin
             ```
 
             **Codex CLI** — append `packages/clients/codex/config.toml` to `~/.codex/config.toml`.
 
-            No token or setup is required: the hub serves two read-only greeting tools
-            anonymously. To point a client at a different channel, run
-            `PIVOTLY_CHANNEL=dev npm run clients:generate`.
+            > Cut with the pipeline in no-Azure mode: everything was verified against a
+            > hub the test suite starts itself, and no hub was deployed. The client
+            > configs still point at the production channel URL, which will not answer
+            > until the Azure pipeline on the `with-azure` branch is restored and run.

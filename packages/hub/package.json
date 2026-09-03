@@ -1,6 +1,6 @@
 {
   "name": "@pivotly/hub",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Pivotly MCP hub: a stateless, anonymous, cloud-hosted MCP server. Two read-only greeting tools, no database, no upstream API, no credentials.",
   "main": "src/index.js",

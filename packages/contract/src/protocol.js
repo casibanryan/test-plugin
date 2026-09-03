@@ -17,7 +17,7 @@ const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26
 // The Pivotly contract: the tool surface plus the conventions around it.
 // MAJOR = a tool or field was removed, or its meaning changed (clients must update).
 // MINOR = additive only (older clients keep working).
-const CONTRACT_VERSION = '0.3.0';
+const CONTRACT_VERSION = '0.3.1';
 
 // ---------------------------------------------------------------------------
 // Channels

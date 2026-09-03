@@ -1,6 +1,6 @@
 {
   "name": "@pivotly/e2e",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Multi-tier end-to-end suite: contract integrity, remote MCP protocol behaviour, and client/channel compatibility against any hub endpoint.",
   "engines": {
