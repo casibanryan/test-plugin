@@ -14,7 +14,7 @@ on:
       node-version:
         description: Node version for the single-version jobs.
         type: string
-        default: '22'
+        default: '20'
       tag:
         description: Release tag being verified, if any. When set, the tag must match the repo version.
         type: string
@@ -60,9 +60,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 20 is the declared engines floor and 22 is what the deployed app runs. Both,
-        # because a deploy that only ever ran on 22 would hide a floor violation.
-        node: ['20', '22']
+        # 20 only, for now. It is the declared engines floor, so it is the leg that
+        # catches a floor violation — the one this repo cannot afford to lose. The
+        # second leg was 22, because that is what App Service runs; with nothing
+        # deployed there is nothing on 22 to match, and it comes back with the deploy
+        # jobs on the `with-azure` branch.
+        node: ['20']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
