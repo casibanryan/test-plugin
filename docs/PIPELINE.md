@@ -14,9 +14,15 @@
 > | [`bump.yml`](../.github/workflows/bump.yml) | manual | `npm run version:bump`, verifies the bumped tree, pushes it — **the button that makes an installed plugin see an update** |
 > | [`release.yml`](../.github/workflows/release.yml) | tag `v*.*.*` | `_verify.yml` with the tag, then publishes the GitHub release |
 >
-> Nothing is deployed, so the client configs still point at a production URL that will
-> not answer, and `channels.json` keeps the `lastVerified` records it has — a run that
-> deploys nothing may not claim a channel was verified.
+> Nothing is deployed, and the client configs no longer need anything to be: they are
+> generated for the `bundled` channel, whose MCP server ships inside the plugin and is
+> started over stdio. `channels.json` keeps the `lastVerified` records it has — a run
+> that deploys nothing may not claim a channel was verified.
+>
+> The `clients` job carries the check that matters for this mode: it exports the repo
+> the way a marketplace install copies it, then **spawns the bundled server from that
+> export** and asserts it answers a real tool call. A missing file or a dependency that
+> needs installing fails there rather than on a user's machine.
 
 One shared definition of "is this good", called by every workflow that has an
 opinion about whether the tree is shippable.

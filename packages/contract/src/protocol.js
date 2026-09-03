@@ -33,10 +33,32 @@ const CONTRACT_VERSION = '0.3.1';
 //   prerelease   deployed on a version tag and fully verified. What production is
 //                about to become.
 //   production   an approval, then a slot swap from prerelease.
-const CHANNELS = ['local', 'dev', 'prerelease', 'production'];
+//   bundled      no host at all: the greeting server ships inside the plugin and the
+//                client spawns it over stdio. It is first on the list because it is
+//                the DEFAULT — a plugin that works the moment it is installed, with
+//                no network, no account and nothing deployed.
+const CHANNELS = ['bundled', 'local', 'dev', 'prerelease', 'production'];
+
+// How a client reaches each channel. Two answers, and the difference is not cosmetic:
+// an `http` channel is a URL someone has to deploy and keep up, and a `stdio` channel
+// is a process the client starts itself. Every check that asserts something about a
+// URL has to consult this first, or it will demand an https address from a channel
+// that has no address at all.
+const CHANNEL_TRANSPORTS = {
+  bundled: 'stdio',
+  local: 'http',
+  dev: 'http',
+  prerelease: 'http',
+  production: 'http',
+};
+
+const transportOf = (channel) => CHANNEL_TRANSPORTS[channel] || null;
+const HTTP_CHANNELS = CHANNELS.filter((c) => CHANNEL_TRANSPORTS[c] === 'http');
+const STDIO_CHANNELS = CHANNELS.filter((c) => CHANNEL_TRANSPORTS[c] === 'stdio');
 
 // Channels that must never run on plaintext HTTP. `local` and `dev` may; the two below
-// carry real traffic and are held to https.
+// carry real traffic and are held to https. `bundled` is absent because it never
+// touches a network — there is no transport to secure.
 const HARDENED_CHANNELS = ['prerelease', 'production'];
 
 // Which channel a push to main keeps current, and which one a tag deploys to. Read by
@@ -120,6 +142,10 @@ module.exports = {
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
   CONTRACT_VERSION,
   CHANNELS,
+  CHANNEL_TRANSPORTS,
+  HTTP_CHANNELS,
+  STDIO_CHANNELS,
+  transportOf,
   HARDENED_CHANNELS,
   CONTINUOUS_CHANNEL,
   RELEASE_CHANNEL,

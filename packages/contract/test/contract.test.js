@@ -183,7 +183,20 @@ test('protocol constants are coherent', () => {
 });
 
 test('the channel ladder is ordered and its rungs are declared', () => {
-  assert.deepEqual(protocol.CHANNELS, ['local', 'dev', 'prerelease', 'production']);
+  assert.deepEqual(protocol.CHANNELS, ['bundled', 'local', 'dev', 'prerelease', 'production']);
+
+  // Every channel declares how it is reached, and only those two answers exist. A
+  // channel with no transport would sail past every check that branches on one.
+  for (const c of protocol.CHANNELS) {
+    assert.ok(['http', 'stdio'].includes(protocol.transportOf(c)), `${c} has no declared transport`);
+  }
+  assert.deepEqual(protocol.STDIO_CHANNELS, ['bundled']);
+  assert.deepEqual(protocol.HTTP_CHANNELS, ['local', 'dev', 'prerelease', 'production']);
+
+  // A hardened channel is one that carries real traffic over a network, so it can
+  // never be a stdio channel — there would be no transport to harden.
+  for (const c of protocol.HARDENED_CHANNELS) assert.equal(protocol.transportOf(c), 'http');
+
   // The pipeline reads these rather than hard-coding channel names in YAML.
   assert.ok(protocol.CHANNELS.includes(protocol.CONTINUOUS_CHANNEL));
   assert.ok(protocol.CHANNELS.includes(protocol.RELEASE_CHANNEL));

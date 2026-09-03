@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { TOOL_NAMES } = require('@pivotly/contract/tools');
-const { CONTRACT_VERSION, CLIENTS, CHANNELS } = require('@pivotly/contract/protocol');
+const { CONTRACT_VERSION, CLIENTS, CHANNELS, transportOf } = require('@pivotly/contract/protocol');
 const { contractDigest, lockBody, contractSurface } = require('@pivotly/contract/digest');
 const { assertHandlersMatchContract } = require('@pivotly/hub/src/mcp');
 const { renderAll } = require('@pivotly/clients/scripts/generate');
@@ -73,7 +73,11 @@ async function run({ check }) {
   for (const channelName of CHANNELS) {
     const channel = manifest.channels[channelName];
     if (!check(`channel "${channelName}" is declared`, Boolean(channel))) continue;
-    check(`channel "${channelName}" has a url`, Boolean(channel.url), JSON.stringify(channel));
+    check(
+      `channel "${channelName}" says where it is reached`,
+      transportOf(channelName) === 'stdio' ? Boolean(channel.command) : Boolean(channel.url),
+      JSON.stringify(channel)
+    );
     if (channel.lastVerified != null) {
       check(
         `channel "${channelName}" has a well-formed verification record`,

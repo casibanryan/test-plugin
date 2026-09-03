@@ -33,7 +33,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { CHANNELS } = require('@pivotly/contract/protocol');
+const { CHANNELS, transportOf } = require('@pivotly/contract/protocol');
 
 const TIERS = [require('./tiers/tier1-contract'), require('./tiers/tier2-protocol'), require('./tiers/tier3-clients')];
 
@@ -92,6 +92,13 @@ async function main() {
     for (const name of CHANNELS) {
       const channel = manifest.channels[name];
       if (!channel) continue;
+      // Tiers 2 and 3 drive an HTTP endpoint. A stdio channel has none — it is covered
+      // by the bundled-server tests instead, so skipping it here is correct rather
+      // than a gap.
+      if (transportOf(name) === 'stdio') {
+        console.log(`skip  channel "${name}" is served over stdio, which tiers 2 and 3 cannot drive`);
+        continue;
+      }
       // The channel URL includes the MCP path; the tiers want the origin.
       const origin = new URL(channel.url).origin;
       targets.push({ label: name, hubUrl: origin, channel: name });

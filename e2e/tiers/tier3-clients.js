@@ -31,7 +31,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { compareContract } = require('@pivotly/contract');
-const { CONTRACT_VERSION, ENDPOINTS, HEADERS, CLIENTS } = require('@pivotly/contract/protocol');
+const { CONTRACT_VERSION, ENDPOINTS, HEADERS, CLIENTS, transportOf } = require('@pivotly/contract/protocol');
 const { contractDigest } = require('@pivotly/contract/digest');
 const { TOOL_NAMES, getTool } = require('@pivotly/contract/tools');
 const { renderAll } = require('@pivotly/clients/scripts/generate');
@@ -115,9 +115,22 @@ async function run({ hubUrl, channel, check, timeoutMs }) {
       check(`${r.relative} is generated for the default channel ("${channelName}")`, committed === r.content, 'run: npm run clients:generate');
     }
 
-    // These hold for whichever channel the configs target.
-    check(`${r.relative} carries no credential`, !/authorization/i.test(committed), 'the hub is anonymous; a client must not send one');
-    check(`${r.relative} identifies its client to the hub`, committed.includes(HEADERS.client), `missing the ${HEADERS.client} header`);
+    // Holds for every channel and both transports: there is no credential to send.
+    check(`${r.relative} carries no credential`, !/authorization/i.test(committed), 'the tools are anonymous; a client must not send one');
+
+    // The identity headers only exist on an http config. A stdio config is a command
+    // the client runs, with no request to attach a header to — so the equivalent
+    // check is that it names the server to run and reaches it relocatably.
+    if (transportOf(channelName) === 'stdio') {
+      check(`${r.relative} names a server to run`, /"?command"?\s*[:=]/.test(committed), 'a stdio config must declare a command');
+      check(
+        `${r.relative} carries no url, being stdio`,
+        !/https?:\/\//.test(committed),
+        (committed.match(/https?:\/\/[^\s"']+/) || [])[0]
+      );
+    } else {
+      check(`${r.relative} identifies its client to the hub`, committed.includes(HEADERS.client), `missing the ${HEADERS.client} header`);
+    }
   }
   if (!isDefaultChannel) {
     console.log(`      note: client configs are committed for the "${manifest.default}" channel; here only the "${channelName}" pin is compared`);
