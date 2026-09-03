@@ -205,6 +205,45 @@ for (const client of CLIENTS) {
       }
     }
 
+    // --- the hooks the plugin ships ---------------------------------------
+    // The version notice is the only thing that tells a user their plugin moved, so a
+    // hook that silently fails to load is a release that looks like it never shipped.
+    // A hook is also the one part of a plugin that RUNS on every session start, which
+    // makes a bad path here more expensive than a bad path anywhere else.
+    if (plugin && plugin.hooks) {
+      const hooksRel = String(plugin.hooks).replace(/^\.\//, '');
+      const hooksFile = readJson(path.join(dir, hooksRel), `${client.id}/${hooksRel}`);
+      if (hooksFile) {
+        const events = Object.keys(hooksFile.hooks || {});
+        ok(`${client.id} hooks declare at least one event`, events.length > 0);
+        ok(`${client.id} hooks run on SessionStart`, events.includes('SessionStart'), `declares: ${events.join(', ') || 'nothing'}`);
+
+        const commands = events
+          .flatMap((event) => hooksFile.hooks[event] || [])
+          .flatMap((matcher) => matcher.hooks || [])
+          .map((entry) => entry.command)
+          .filter(Boolean);
+        ok(`${client.id} every declared hook has a command`, commands.length > 0);
+
+        for (const command of commands) {
+          // The install path carries the version number, so it is different for every
+          // release. A hook that hardcodes one works exactly until the next update —
+          // the single upgrade it most needs to survive.
+          ok(
+            `${client.id} hook resolves its path through CLAUDE_PLUGIN_ROOT (${command.slice(0, 48)})`,
+            command.includes('CLAUDE_PLUGIN_ROOT'),
+            command
+          );
+
+          // Every plugin-relative script the command names must actually be in the
+          // tree that gets copied on install.
+          for (const match of command.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/([^"'\s]+)/g)) {
+            ok(`${client.id} hook script ${match[1]} is present`, fs.existsSync(path.join(dir, match[1])), path.join(dir, match[1]));
+          }
+        }
+      }
+    }
+
     // The repo marketplace entry, which is how the plugin is installed.
     const marketplace = readJson(path.join(REPO_ROOT, '.claude-plugin', 'marketplace.json'), 'repo marketplace.json');
     if (marketplace && plugin) {

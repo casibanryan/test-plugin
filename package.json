@@ -1,6 +1,6 @@
 {
   "name": "pivotly-ai",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Pivotly AI monorepo: contract (source of truth), hub (cloud MCP server), and the Axle Claude client.",
   "engines": {
@@ -19,6 +19,7 @@
     "contract:digest": "node packages/contract/bin/contract-digest.js",
     "contract:verify": "node packages/contract/bin/contract-digest.js --verify",
     "versions:verify": "node scripts/verify-versions.js",
+    "version:bump": "node scripts/bump-version.js",
     "dev:hub": "npm run dev -w @pivotly/hub",
     "hub:selftest": "npm run selftest -w @pivotly/hub",
     "smoke": "node --env-file-if-exists=.env packages/hub/scripts/smoke-remote.js",

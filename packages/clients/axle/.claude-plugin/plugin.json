@@ -1,6 +1,6 @@
 {
   "name": "axle",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Axle: the Pivotly Claude Code client. Connects Claude Code to the Pivotly MCP hub over HTTPS and exposes its read-only greeting tools. No token or setup required.",
   "author": {
     "name": "Pivotly"
@@ -12,5 +12,6 @@
     "remote",
     "axle"
   ],
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json"
 }

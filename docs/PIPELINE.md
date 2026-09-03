@@ -1,5 +1,21 @@
 # The pipeline
 
+> **This branch runs CD in no-Azure mode.** Everything below about the ladder — the
+> dev slot, the prerelease slot, the approval gate, the swap into production, the
+> rollback, and every secret and variable they need — describes the pipeline preserved
+> on the **`with-azure`** branch, and is what comes back when that `cd.yml` is
+> restored. What `cd.yml` does on this branch is narrower and needs no cloud at all:
+>
+> | Trigger | Does |
+> | --- | --- |
+> | push to `main` | `_verify.yml`, then reports the plugin version main now serves |
+> | manual, `bump` = patch/minor/major | `npm run version:bump`, verifies the bumped tree, pushes it to `main` — the button that makes an installed plugin see an update |
+> | tag `v*.*.*` | `_verify.yml`, then publishes the GitHub release |
+>
+> Nothing is deployed, so the client configs still point at a production URL that will
+> not answer, and `channels.json` keeps the `lastVerified` records it has — a run that
+> deploys nothing may not claim a channel was verified.
+
 Two workflows and one shared definition of "is this good".
 
 | File | Runs on | Does |

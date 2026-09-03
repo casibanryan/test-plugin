@@ -1,6 +1,6 @@
 {
   "name": "@pivotly/contract",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Single source of truth for Pivotly MCP tool schemas, types, auth conventions, and protocol versions. Every other workspace derives from this and nothing here derives from them.",
   "main": "src/index.js",

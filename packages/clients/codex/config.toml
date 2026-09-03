@@ -6,4 +6,4 @@ url = "https://pivotly-hub.azurewebsites.net/mcp"
 [mcp_servers.pivotly_hub.http_headers]
 "x-pivotly-client" = "codex"
 "x-pivotly-channel" = "production"
-"x-pivotly-contract" = "0.3.0"
+"x-pivotly-contract" = "0.3.1"

@@ -7,7 +7,7 @@
       "headers": {
         "x-pivotly-client": "axle",
         "x-pivotly-channel": "production",
-        "x-pivotly-contract": "0.3.0"
+        "x-pivotly-contract": "0.3.1"
       }
     }
   }

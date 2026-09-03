@@ -114,7 +114,7 @@ jobs:
           mkdir -p /tmp/installed
           git archive HEAD | tar -x -C /tmp/installed
           cd /tmp/installed/packages/clients/axle
-          for f in .claude-plugin/plugin.json .mcp.json skills; do
+          for f in .claude-plugin/plugin.json .mcp.json skills hooks/hooks.json hooks/version-notice.js; do
             test -e "$f" || { echo "::error::$f is missing from a clean export"; exit 1; }
           done
           node -e "
