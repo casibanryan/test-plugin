@@ -264,13 +264,16 @@ packages/server/            @pivotly/server — the MCP server, canonical copy
   index.js                  the contract-aware face: assertHandlersMatchContract
   test/                     greeting unit tests, and contract coherence
 
+packages/skills/            the canonical skills, one copy of each
+  <name>/SKILL.md           prose + host-conditional blocks, rendered per client
+
 packages/clients/           @pivotly/clients — every client, generated
   channels.json             SHARED: channel -> address + what it last served
   scripts/generate.js       one manifest -> every client config, and the copies
   scripts/verify.js         what a marketplace install depends on
-  claude/                   Claude Code plugin (manifest + skills + hooks + server/)
-  codex/                    Codex CLI (config.toml)
-  gemini/                   Gemini CLI (settings.json)
+  claude/                   Claude Code plugin (manifest + skills/ + hooks + server/)
+  codex/                    Codex CLI (config.toml + .codex/skills/)
+  gemini/                   Gemini CLI (settings.json + .gemini/skills/)
 
 e2e/                        tier 1 contract, tier 2 protocol over a real pipe
 scripts/verify-versions.js  one check: every version and channel pin agrees

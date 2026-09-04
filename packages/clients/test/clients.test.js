@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile);
 const { CHANNELS, HARDENED_CHANNELS, ENDPOINTS, HEADERS, CLIENTS, CONTRACT_VERSION, transportOf, STDIO_CHANNELS } = require('@pivotly/contract/protocol');
 const { contractDigest } = require('@pivotly/contract/digest');
 const { compareContract } = require('@pivotly/contract');
-const { renderAll, headersFor, writeToml, writeMcpJson, writeGeminiJson } = require('../scripts/generate');
+const { renderAll, headersFor, writeToml, writeMcpJson, writeGeminiJson, renderSkill, skillReach, Skill } = require('../scripts/generate');
 
 const ROOT = path.join(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'channels.json'), 'utf8'));
@@ -464,4 +464,107 @@ test('--print reports every client without writing anything', async () => {
   assert.equal(out.thisCheckout.digest, contractDigest());
   assert.deepEqual(out.clients.map((c) => c.id).sort(), CLIENTS.map((c) => c.id).sort());
   assert.deepEqual(CLIENTS.map((c) => readConfig(dir, c.id)), before, '--print must not write');
+});
+
+// ---------------------------------------------------------------------------
+// Skills: one source, rendered per host
+// ---------------------------------------------------------------------------
+// The failure these guard against is quieter than a bad config. A skill shipped to the
+// wrong host does not crash anything — it just tells that host to do something
+// impossible, and the only symptom is a model behaving oddly.
+
+test('every declared client receives the skills that name it, and no others', () => {
+  for (const skill of Skill.all()) {
+    for (const client of CLIENTS) {
+      if (!client.skillsPath) continue;
+      const file = path.join(ROOT, client.id, client.skillsPath, skill.name, 'SKILL.md');
+      assert.equal(
+        fs.existsSync(file),
+        skill.reaches(client.id),
+        `${client.id}/${skill.name}: on disk=${fs.existsSync(file)} but declared reach=${skill.reaches(client.id)}`
+      );
+    }
+  }
+});
+
+test('a rendered skill keeps its own host blocks and drops every other', () => {
+  const source = [
+    '---',
+    'name: probe',
+    'clients: [claude, codex, gemini]',
+    '<!-- if:claude -->',
+    'description: the claude one, use when greeting',
+    '<!-- endif -->',
+    '<!-- if:codex,gemini -->',
+    'description: the shared one, use when greeting',
+    '<!-- endif -->',
+    '---',
+    '',
+    'shared body',
+    '<!-- if:claude -->',
+    'claude only',
+    '<!-- endif -->',
+    '<!-- if:gemini -->',
+    'gemini only',
+    '<!-- endif -->',
+  ].join('\n');
+
+  const claude = renderSkill(source, 'claude', 'probe');
+  assert.match(claude, /claude only/);
+  assert.doesNotMatch(claude, /gemini only/);
+  assert.match(claude, /description: the claude one/);
+
+  const gemini = renderSkill(source, 'gemini', 'probe');
+  assert.match(gemini, /gemini only/);
+  assert.doesNotMatch(gemini, /claude only/);
+  assert.match(gemini, /description: the shared one/);
+
+  // Build-only metadata and the markers themselves must never reach a host, and a
+  // rendering must carry exactly one description or the host reads whichever it parses
+  // first.
+  for (const rendered of [claude, gemini, renderSkill(source, 'codex', 'probe')]) {
+    assert.doesNotMatch(rendered, /<!--\s*(if:|endif)/, 'conditional markers must be stripped');
+    assert.doesNotMatch(rendered, /^clients:/m, 'the build-only clients: line must be stripped');
+    assert.equal((rendered.match(/^description:/gm) || []).length, 1);
+  }
+});
+
+test('an authoring mistake in a skill fails loudly, naming the line', () => {
+  const front = '---\nname: probe\nclients: [claude]\ndescription: probe, use never\n---\n';
+  assert.throws(() => renderSkill(`${front}\n<!-- if:clod -->\nx\n<!-- endif -->\n`, 'claude', 'probe'), /unknown client "clod"/);
+  assert.throws(() => renderSkill(`${front}\n<!-- if:claude -->\nx\n`, 'claude', 'probe'), /never closes it/);
+  assert.throws(() => renderSkill(`${front}\n<!-- endif -->\n`, 'claude', 'probe'), /no matching <!-- if: -->/);
+  // Reach is required, never defaulted to everyone.
+  assert.throws(() => skillReach('---\nname: probe\ndescription: x\n---\n', 'probe'), /must declare which clients receive it/);
+  assert.throws(() => skillReach('---\nname: probe\nclients: []\n---\n', 'probe'), /should be deleted, not shipped/);
+});
+
+test('a skill left behind after its reach narrows is reported, then pruned', async () => {
+  const dir = scratchCopy();
+  const client = CLIENTS.find((c) => c.skillsPath);
+  const stale = path.join(dir, client.id, client.skillsPath, 'leftover');
+  fs.mkdirSync(stale, { recursive: true });
+  fs.writeFileSync(path.join(stale, 'SKILL.md'), '---\nname: leftover\ndescription: nobody declares this, use never\n---\n\nstale.\n');
+
+  const checked = await run(dir, ['--check']);
+  assert.equal(checked.code, 1);
+  assert.match(checked.stderr, /leftover is not declared by any skill/);
+
+  const written = await run(dir, ['--write']);
+  assert.equal(written.code, 0, written.stderr);
+  assert.equal(fs.existsSync(stale), false, '--write must remove a skill no longer declared for this client');
+});
+
+test('--print reports one entry per client, however many files a client receives', async () => {
+  const dir = scratchCopy();
+  const res = await run(dir, ['--print']);
+  assert.equal(res.code, 0, res.stderr);
+  const out = JSON.parse(res.stdout);
+  // The regression this pins: folding skills into `clients` made every client appear
+  // once per file it received.
+  assert.deepEqual(
+    out.clients.map((c) => c.id),
+    CLIENTS.map((c) => c.id)
+  );
+  assert.ok(out.generated.length > out.clients.length, 'generated lists every file, so it must be the longer list');
 });

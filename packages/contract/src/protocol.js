@@ -84,6 +84,11 @@ const CLIENTS = [
     host: 'Claude Code',
     format: 'mcp-json',
     configPath: '.mcp.json',
+    // Where this host discovers SKILL.md directories, relative to the client directory.
+    // All three hosts read the same open SKILL.md format, so the skills are compiled
+    // from ONE source in packages/skills — only the destination differs. A client with
+    // no skillsPath simply receives none.
+    skillsPath: 'skills',
     // Installed as a Claude Code plugin, so it also carries a plugin manifest, skills,
     // and its own copy of the server — a marketplace install cannot reach this repo.
     plugin: true,
@@ -94,6 +99,10 @@ const CLIENTS = [
     host: 'Codex CLI',
     format: 'toml',
     configPath: 'config.toml',
+    // Codex reads project skills from .codex/skills. Unlike the plugin client, nothing
+    // installs these for the user: they are generated here and have to be copied into
+    // the project (or ~/.codex/skills), the same reach limit as this client's config.
+    skillsPath: '.codex/skills',
     plugin: false,
   },
   {
@@ -107,6 +116,9 @@ const CLIENTS = [
     // at connect time rather than at generate time.
     format: 'gemini-json',
     configPath: 'settings.json',
+    // Same story as Codex: .gemini/skills is a directory in the user's project, not
+    // something this package installs.
+    skillsPath: '.gemini/skills',
     plugin: false,
   },
 ];
