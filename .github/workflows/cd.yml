@@ -17,10 +17,10 @@
 #
 # What a push to main does NOT do here, because both need a live hub to read:
 #   * deploy anything
-#   * `clients:sync-pin`, which reads the channel's /version — so channels.json keeps
-#     the lastVerified records it has, rather than being advanced by a run that
+#   * `clients:sync-pin`, which reads a channel's /version — so channels.json keeps the
+#     lastVerified records it has (all null), rather than being advanced by a run that
 #     deployed nothing
-# The e2e tiers still run in _verify.yml, against a hub the suite starts itself.
+# The e2e tiers still run in _verify.yml, against the server the suite spawns itself.
 
 name: CD
 
@@ -59,8 +59,8 @@ jobs:
       - name: The plugin version on main
         run: |
           set -u
-          marketplace=$(node -p "require('./.claude-plugin/marketplace.json').plugins.find(p => p.name === 'axle').version")
-          plugin=$(node -p "require('./packages/clients/axle/.claude-plugin/plugin.json').version")
+          marketplace=$(node -p "require('./.claude-plugin/marketplace.json').plugins.find(p => p.name === 'claude').version")
+          plugin=$(node -p "require('./packages/clients/claude/.claude-plugin/plugin.json').version")
 
           # versions:verify already asserted this in the verify job. Repeated because
           # this is the one number a user's client compares against its cached copy to
@@ -72,15 +72,15 @@ jobs:
           fi
 
           {
-            echo "### axle $plugin"
+            echo "### claude $plugin"
             echo ""
             echo "| | |"
             echo "|---|---|"
             echo "| version | \`$plugin\` |"
             echo "| commit | \`${GITHUB_SHA:0:12}\` |"
-            echo "| channel the shipped config points at | \`production\` |"
+            echo "| channel the shipped config points at | \`bundled\` |"
             echo ""
-            echo "Clients tracking main get this on their next marketplace refresh. The hub"
-            echo "itself is not deployed in no-Azure mode, so its tools will not answer."
+            echo "Clients tracking main get this on their next marketplace refresh. The plugin"
+            echo "ships its own server, so its tools answer with nothing deployed."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "ok  main serves axle $plugin at ${GITHUB_SHA:0:12}"
+          echo "ok  main serves claude $plugin at ${GITHUB_SHA:0:12}"

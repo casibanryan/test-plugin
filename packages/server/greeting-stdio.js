@@ -1,26 +1,22 @@
 #!/usr/bin/env node
-// packages/clients/axle/server/greeting-stdio.js
-// The MCP server that ships INSIDE the plugin. The client spawns it over stdio, so it
-// needs no host, no network, no account and no credential — an install works
+// packages/server/greeting-stdio.js
+// THE MCP server. A client spawns it as a child process and speaks to it over stdio,
+// so it needs no host, no network, no account and no credential. An install works
 // immediately, and offline.
 //
-// ZERO DEPENDENCIES, and that is a requirement rather than a preference: a marketplace
-// install copies this directory as-is, with no `npm install` and no build step. The
-// hub's own server uses the MCP SDK and zod, which together are 10.5 MB across 1,289
-// files; vendoring that into a plugin to serve two pure functions would be absurd. So
-// the wire protocol is implemented here directly — it is newline-delimited JSON-RPC
-// 2.0, and the three methods a client actually needs are below.
+// This file is the CANONICAL copy. `npm run clients:generate` copies it, greeting.js
+// and the generated tools.json into each plugin client's own server/ directory,
+// because a marketplace install copies only the plugin directory and cannot reach back
+// into this repository. Those copies are generated artifacts under the same drift
+// check as every client config — edit them here, never there.
 //
-// What it is NOT: a replacement for packages/hub. The hub is the hosted, multi-client,
-// logged, health-checked service, and it stays the thing a deployment serves. This is
-// the same tool surface with the transport swapped for a pipe, so the plugin works
-// whether or not anything is deployed.
+// ZERO DEPENDENCIES, and that is a requirement rather than a preference: the copy a
+// marketplace install receives gets no `npm install` and no build step. So the wire
+// protocol is implemented here directly — newline-delimited JSON-RPC 2.0, and the
+// three methods a client actually needs are below.
 //
-// Its two halves are both derived, never hand-written:
-//   ./tools.json     GENERATED from the contract by `npm run clients:generate`
-//   ./greeting.js    a byte-identical copy of packages/hub/src/lib/greeting.js
-// `npm run clients:verify` fails if either drifts, so this server cannot answer with a
-// surface or a behaviour that differs from the hub's.
+// The tool surface is not hand-written either: ./tools.json is GENERATED from the
+// contract, so this server cannot advertise a surface the contract does not declare.
 
 'use strict';
 
@@ -176,6 +172,14 @@ function handle(request) {
 // stdin: newline-delimited JSON, one message per line. Buffered because a single read
 // can split a message or carry several.
 // ---------------------------------------------------------------------------
+// Exported so the contract suite can assert this handler set covers exactly the tools
+// the contract declares, without spawning anything. The transport below starts only
+// when this file is RUN — a `require` of it has no side effects.
+module.exports = { HANDLERS, TOOLS, MANIFEST, handle, validate };
+
+// Valid in CommonJS: the module body is already wrapped in a function.
+if (require.main !== module) return;
+
 let buffer = '';
 
 process.stdin.setEncoding('utf8');

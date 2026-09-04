@@ -77,13 +77,10 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # The hub suite boots a real HTTP server on ephemeral ports. With no database and
-      # no upstream API there is nothing to stand up first and nothing to wait for.
+      # Nothing to stand up first: no database, no upstream API, no port. The client
+      # suite spawns the server as a child process, which is how a client runs it.
       - name: All workspace tests
         run: npm test
-
-      - name: The hub self-test reports a coherent build
-        run: npm run hub:selftest
 
   # ---------------------------------------------------------------------------
   # Every declared client, not just the plugin. The checks iterate the contract's
@@ -102,14 +99,13 @@ jobs:
       - run: npm ci
 
       - name: The plugin manifest validates against the plugin schema
-        run: npx --yes @anthropic-ai/claude-code plugin validate ./packages/clients/axle
+        run: npx --yes @anthropic-ai/claude-code plugin validate ./packages/clients/claude
 
       - name: Client configs, channel pins, and skills
         run: npm run clients:verify
 
       # Read-only: it must not repair the drift it is checking, or a pull request could
-      # pass by rewriting the evidence. An unreachable channel is tolerated, so a fork
-      # with no route to Azure still gets a meaningful result.
+      # pass by rewriting the evidence.
       - name: Every client config is in sync with the channel manifest
         run: npm run clients:check -- --timeout-ms=5000
 
@@ -119,7 +115,7 @@ jobs:
           # reproduces that and asserts the plugin's files stand on their own.
           mkdir -p /tmp/installed
           git archive HEAD | tar -x -C /tmp/installed
-          cd /tmp/installed/packages/clients/axle
+          cd /tmp/installed/packages/clients/claude
           for f in .claude-plugin/plugin.json .mcp.json skills hooks/hooks.json hooks/version-notice.js \
                    server/greeting-stdio.js server/greeting.js server/tools.json; do
             test -e "$f" || { echo "::error::$f is missing from a clean export"; exit 1; }
@@ -154,28 +150,35 @@ jobs:
             }
           "
 
-          # The bundled server has to run from the exported tree with no npm install,
-          # which is the one thing a file-presence check cannot tell you.
+          # The plugin's copy of the server has to run from the exported tree with no
+          # npm install, which is the one thing a file-presence check cannot tell you.
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"greeting_hello","arguments":{"name":"CI","hour":9}}}' \
             | node server/greeting-stdio.js \
             | node -e "
               let s=''; process.stdin.on('data',d=>s+=d).on('end',()=>{
                 const m = JSON.parse(s.trim().split('\n')[0]);
-                if (m.result && m.result.isError) { console.error('FAIL: the bundled server refused a valid call: ' + m.result.content[0].text); process.exit(1); }
+                if (m.result && m.result.isError) { console.error('FAIL: the shipped server refused a valid call: ' + m.result.content[0].text); process.exit(1); }
                 if (!m.result || !m.result.structuredContent || m.result.structuredContent.ok !== true) {
-                  console.error('FAIL: the bundled server did not answer: ' + s); process.exit(1);
+                  console.error('FAIL: the shipped server did not answer: ' + s); process.exit(1);
                 }
-                console.log('ok  the bundled server answers from a clean export: ' + JSON.stringify(m.result.structuredContent.message));
+                console.log('ok  the shipped server answers from a clean export: ' + JSON.stringify(m.result.structuredContent.message));
               });
             "
 
   # ---------------------------------------------------------------------------
-  # The deployable artifact, built and then tested FROM THE ARTIFACT — not from the
-  # checkout. A build that passes in the repo and fails once packaged is a class of
-  # failure that only shows up in the deployed channel otherwise.
+  # The dependency tree is the whole attack surface here: two workspaces of plain Node
+  # with one runtime dependency between them. Production dependencies only — a
+  # devDependency advisory is not a shipped risk, and failing on one would train
+  # everyone to ignore this step.
+  #
+  # This job used to also package a deployable hub artifact, scan it, boot it from the
+  # packaged tree and upload it for CD. There is no hub in this repository any more
+  # (see docs/ARCHITECTURE.md); the equivalent proof for what actually ships now is the
+  # clean-export check in the `clients` job above, which runs the plugin's own copy of
+  # the server out of a `git archive` with no npm install.
   # ---------------------------------------------------------------------------
-  artifact:
-    name: Package and scan the deployable artifact
+  audit:
+    name: Scan the production dependency tree
     runs-on: ubuntu-latest
     needs: contract
     steps:
@@ -186,65 +189,21 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # The hub is a Node process on App Service with no OS layer of its own, so the
-      # dependency tree is the surface worth scanning. Production dependencies only: a
-      # devDependency advisory is not a deployed risk and failing on one would train
-      # everyone to ignore this step.
       - name: Vulnerability scan of the production dependency tree
         run: |
           set -o pipefail
-          npm audit --omit=dev --audit-level=high --workspace @pivotly/hub --include-workspace-root | tee audit.txt || {
-            echo '::error::npm audit found a high or critical advisory in a production dependency of the hub'
+          npm audit --omit=dev --audit-level=high | tee audit.txt || {
+            echo '::error::npm audit found a high or critical advisory in a production dependency'
             exit 1
           }
 
-      - name: Build the artifact
-        env:
-          BUILD_COMMIT: ${{ github.sha }}
-        run: npm run package:hub
-
-      - name: Only the hub is in the artifact
-        run: |
-          for path in packages/hub/test packages/hub/testkit packages/clients e2e; do
-            if [ -e "dist/hub/$path" ]; then
-              echo "::error::$path was packaged into the deployable artifact"
-              exit 1
-            fi
-          done
-          echo 'ok  the artifact contains only the hub and its contract'
-
-      - name: The artifact boots and self-tests
-        working-directory: dist/hub
-        run: |
-          # --selftest needs no configuration at all, so this proves the packaged tree
-          # can load the contract and that its declared and implemented tools agree.
-          node packages/hub/src/index.js --selftest | tee selftest.json
-          node -e "
-            const out = JSON.parse(require('fs').readFileSync('selftest.json', 'utf8'));
-            const artifact = JSON.parse(require('fs').readFileSync('artifact.json', 'utf8'));
-            if (!out.ok) { console.error('FAIL: selftest reported not ok'); process.exit(1); }
-            if (out.contractDigest !== artifact.contractDigest) {
-              console.error('FAIL: the running code and the artifact manifest disagree about the contract');
-              process.exit(1);
-            }
-            console.log('ok  artifact ' + artifact.artifactDigest + ' serves contract ' + artifact.contractDigest);
-          "
-
-      # Uploaded so CD deploys the exact bytes that were scanned and self-tested here,
-      # rather than rebuilding and hoping the two are identical.
-      - uses: actions/upload-artifact@v7
-        with:
-          name: hub-${{ github.sha }}
-          path: dist/hub
-          retention-days: 14
-          include-hidden-files: false
-
   # ---------------------------------------------------------------------------
-  # All three tiers against a hub the suite starts itself. Uses the identical tier code
-  # that runs against a deployed channel, so a tier that only works in CI is impossible.
+  # Both tiers. Tier 2 spawns every copy of the server and speaks JSON-RPC to it over a
+  # pipe, exactly as a client does — including the copy inside the plugin, which is
+  # what a marketplace install actually launches.
   # ---------------------------------------------------------------------------
   e2e-local:
-    name: End-to-end (local hub, all tiers)
+    name: End-to-end (contract and protocol tiers)
     runs-on: ubuntu-latest
     needs: [unit, clients]
     steps:
@@ -255,5 +214,5 @@ jobs:
           cache: npm
       - run: npm ci
 
-      - name: All three tiers against a hub started by the suite
+      - name: Both tiers, against every copy of the server
         run: npm run e2e

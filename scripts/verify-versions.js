@@ -33,7 +33,7 @@ const same = (label, a, b) => ok(label, a === b, `${JSON.stringify(a)} vs ${JSON
 
 const root = read('package.json');
 const contract = read('packages/contract/package.json');
-const hub = read('packages/hub/package.json');
+const server = read('packages/server/package.json');
 const clients = read('packages/clients/package.json');
 const e2e = read('e2e/package.json');
 const marketplace = read('.claude-plugin/marketplace.json');
@@ -46,7 +46,7 @@ const lock = read('packages/contract/contract.lock.json');
 // drift later.
 same('contract package version == CONTRACT_VERSION', contract.version, CONTRACT_VERSION);
 same('root version == CONTRACT_VERSION', root.version, CONTRACT_VERSION);
-same('hub version == root version', hub.version, root.version);
+same('server version == root version', server.version, root.version);
 same('clients version == root version', clients.version, root.version);
 same('e2e version == root version', e2e.version, root.version);
 

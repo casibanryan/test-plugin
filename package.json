@@ -2,29 +2,26 @@
   "name": "pivotly-ai",
   "version": "0.3.1",
   "private": true,
-  "description": "Pivotly AI monorepo: contract (source of truth), hub (cloud MCP server), and the Axle Claude client.",
+  "description": "Pivotly AI monorepo: contract (source of truth), server (the MCP server, spoken to over stdio), and the generated clients.",
   "engines": {
     "node": ">=20.18.0"
   },
   "workspaces": [
     "packages/contract",
-    "packages/hub",
+    "packages/server",
     "packages/clients",
     "e2e"
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "test:contract": "npm test -w @pivotly/contract",
-    "test:hub": "npm test -w @pivotly/hub",
+    "test:server": "npm test -w @pivotly/server",
     "contract:digest": "node packages/contract/bin/contract-digest.js",
     "contract:verify": "node packages/contract/bin/contract-digest.js --verify",
     "versions:verify": "node scripts/verify-versions.js",
     "version:bump": "node scripts/bump-version.js",
-    "dev:hub": "npm run dev -w @pivotly/hub",
-    "hub:selftest": "npm run selftest -w @pivotly/hub",
-    "smoke": "node --env-file-if-exists=.env packages/hub/scripts/smoke-remote.js",
+    "dev:server": "node packages/server/greeting-stdio.js",
     "e2e": "node --env-file-if-exists=.env e2e/run.js",
-    "package:hub": "node scripts/package-hub.js",
     "verify:all": "npm run contract:verify && npm run versions:verify && npm test && npm run clients:verify && npm run clients:check",
     "ci:local": "node scripts/ci-local.js",
     "test:clients": "npm test -w @pivotly/clients",
@@ -33,5 +30,8 @@
     "clients:print": "node packages/clients/scripts/generate.js --print",
     "clients:verify": "node packages/clients/scripts/verify.js",
     "clients:sync-pin": "node packages/clients/scripts/generate.js --sync-pin"
+  },
+  "dependencies": {
+    "@google/gemini-cli": "^0.58.0"
   }
 }

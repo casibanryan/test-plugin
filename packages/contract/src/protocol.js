@@ -22,21 +22,21 @@ const CONTRACT_VERSION = '0.3.1';
 // ---------------------------------------------------------------------------
 // Channels
 // ---------------------------------------------------------------------------
-// The promotion ladder, ordered from least to most protected. Promotion always moves
-// left to right and the pipeline refuses a skip.
+// `bundled` is the only channel anything is served on today, and it is the default.
+// The four http rungs below are DECLARED but not implemented: the hosted hub was
+// removed from this repository while the Azure environment is still being set up (see
+// docs/ARCHITECTURE.md). They are kept as data — addresses, transports and the
+// promotion order — so that restoring a hosted server is adding a package back, not
+// redesigning the ladder. Nothing generates a client for them by default, and
+// `lastVerified` is null for all four because none has ever been deployed.
 //
-// Each rung has a different trigger, which is the point of having four:
-//
-//   local        your machine. `npm run dev:hub`.
-//   dev          redeployed on every push to main, no gate. There is always something
-//                live to point a client at that is newer than the last release.
-//   prerelease   deployed on a version tag and fully verified. What production is
-//                about to become.
+//   bundled      no host at all: the server runs as a child process of the client,
+//                spoken to over stdio. The DEFAULT, and the reason a plugin works the
+//                moment it is installed, with no network, no account, nothing deployed.
+//   local        your machine, once there is a hub to run again.
+//   dev          intended to redeploy on every push to main, no gate.
+//   prerelease   intended to deploy on a version tag, fully verified.
 //   production   an approval, then a slot swap from prerelease.
-//   bundled      no host at all: the greeting server ships inside the plugin and the
-//                client spawns it over stdio. It is first on the list because it is
-//                the DEFAULT — a plugin that works the moment it is installed, with
-//                no network, no account and nothing deployed.
 const CHANNELS = ['bundled', 'local', 'dev', 'prerelease', 'production'];
 
 // How a client reaches each channel. Two answers, and the difference is not cosmetic:
@@ -79,12 +79,13 @@ const PRODUCTION_CHANNEL = 'production';
 // hand-edited. `format` tells the generator which writer to use.
 const CLIENTS = [
   {
-    id: 'axle',
-    title: 'Axle (Claude Code)',
+    id: 'claude',
+    title: 'Claude Code',
     host: 'Claude Code',
     format: 'mcp-json',
     configPath: '.mcp.json',
-    // Installed as a Claude Code plugin, so it also carries a plugin manifest and skills.
+    // Installed as a Claude Code plugin, so it also carries a plugin manifest, skills,
+    // and its own copy of the server — a marketplace install cannot reach this repo.
     plugin: true,
   },
   {
@@ -131,7 +132,7 @@ const ENDPOINTS = {
 // client, on which channel, built against which contract" — the question you have to
 // answer before retiring a contract version.
 const HEADERS = {
-  client: 'x-pivotly-client',       // which client is calling: axle, codex, ...
+  client: 'x-pivotly-client',       // which client is calling: claude, codex, ...
   channel: 'x-pivotly-channel',     // which channel that client is configured for
   clientContract: 'x-pivotly-contract', // the contract version it was built against
   requestId: 'x-request-id',

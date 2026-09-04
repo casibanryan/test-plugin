@@ -2,7 +2,7 @@
   "name": "@pivotly/clients",
   "version": "0.3.1",
   "private": true,
-  "description": "Every Pivotly client, generated from one contract and one channel manifest. Axle is the Claude Code plugin; codex targets the Codex CLI. Adding a client is a data change in the contract plus a writer here.",
+  "description": "Every Pivotly client, generated from one contract and one channel manifest. claude is the Claude Code plugin, which also ships a copy of packages/server; codex and gemini run the canonical copy. Adding a client is a data change in the contract plus a writer here.",
   "engines": {
     "node": ">=20.18.0"
   },

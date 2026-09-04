@@ -1,0 +1,22 @@
+{
+  "name": "@pivotly/server",
+  "version": "0.3.1",
+  "private": true,
+  "description": "The MCP server, spoken to over stdio. Zero runtime dependencies, because every plugin client ships a copy of it and a marketplace install gets no npm install.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20.18.0"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node greeting-stdio.js"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./greeting": "./greeting.js",
+    "./greeting-stdio": "./greeting-stdio.js"
+  },
+  "devDependencies": {
+    "@pivotly/contract": "*"
+  }
+}

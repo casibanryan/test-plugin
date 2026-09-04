@@ -25,6 +25,9 @@ const { contractDigest } = require('@pivotly/contract/digest');
 
 const ROOT = path.join(__dirname, '..');
 const REPO_ROOT = path.join(ROOT, '..', '..');
+// The one server in this repository. Every plugin ships a copy of these files, and
+// every copy is compared against this directory below.
+const SERVER_SRC = path.join(REPO_ROOT, 'packages', 'server');
 
 const results = [];
 const ok = (label, condition, detail) => {
@@ -161,7 +164,7 @@ for (const client of CLIENTS) {
   // design at all, so anything token-shaped is either a mistake or a leak.
   const suspicious = raw.match(/\b[A-Za-z0-9_-]{32,}\b/g) || [];
   ok(`${client.id} config contains nothing that looks like a secret`, suspicious.length === 0, `suspicious literals: ${suspicious.slice(0, 3).join(', ')}`);
-  ok(`${client.id} config declares no Authorization header`, !/authorization/i.test(raw), 'the hub is anonymous; no auth header should be emitted');
+  ok(`${client.id} config declares no Authorization header`, !/authorization/i.test(raw), 'these tools are anonymous; no auth header should be emitted');
 
   // Which channel this config was generated for decides what has to be true of it.
   // Read from the config's own GENERATED note rather than from channels.json's current
@@ -212,7 +215,7 @@ for (const client of CLIENTS) {
       ok(
         `${client.id} plugin.json names no credential env var`,
         !/\b[A-Z][A-Z0-9_]*(TOKEN|SECRET|KEY|PASSWORD)\b/.test(plugin.description || ''),
-        'the hub is anonymous; pointing users at a credential variable would be wrong'
+        'these tools are anonymous; pointing users at a credential variable would be wrong'
       );
     }
 
@@ -249,17 +252,17 @@ for (const client of CLIENTS) {
       }
     }
 
-    // --- the bundled stdio server -----------------------------------------
-    // Only when this client's config actually points at it. The three files below are
-    // what makes an install work with nothing deployed, and each fails silently in a
-    // different way: a missing server means the tools never appear, a drifted
-    // tools.json means it answers with a surface the hub does not have, and a drifted
-    // greeting.js means the same tool call returns different answers depending on
-    // which server took it.
+    // --- the copy of the server this plugin ships ---------------------------
+    // A marketplace install receives only the plugin directory, so the plugin carries
+    // its own copy of packages/server. Each of the three files fails silently in a
+    // different way if it drifts: a missing server means the tools never appear, a
+    // drifted tools.json means the plugin advertises a surface the contract does not
+    // declare, and a drifted greeting.js means the same tool call answers differently
+    // depending on which copy took it.
     if (transport === 'stdio') {
       const serverDir = path.join(dir, 'server');
       const entry = path.join(serverDir, 'greeting-stdio.js');
-      ok(`${client.id} ships the bundled server`, fs.existsSync(entry), entry);
+      ok(`${client.id} ships its copy of the server`, fs.existsSync(entry), entry);
 
       if (ok(`${client.id} ships the generated tool surface`, fs.existsSync(path.join(serverDir, 'tools.json')))) {
         const tools = readJson(path.join(serverDir, 'tools.json'), `${client.id}/server/tools.json`);
@@ -271,6 +274,11 @@ for (const client of CLIENTS) {
           );
           equal(`${client.id} bundled tool surface is this checkout's contract`, tools.contractDigest, contractDigest());
           equal(`${client.id} bundled tool surface is this checkout's version`, tools.contractVersion, CONTRACT_VERSION);
+          equal(
+            `${client.id} tools.json is identical to the canonical one in packages/server`,
+            tools,
+            readJson(path.join(SERVER_SRC, 'tools.json'), 'packages/server/tools.json')
+          );
           ok(
             `${client.id} every bundled tool is declared read-only, as the contract requires`,
             (tools.tools || []).every((t) => t.readOnly === true),
@@ -279,15 +287,17 @@ for (const client of CLIENTS) {
         }
       }
 
-      // Byte-identical, not merely similar. The bundled server and the hub must answer
-      // the same, or "it works locally" stops being evidence about the deployed one.
-      const shipped = path.join(serverDir, 'greeting.js');
-      const canonical = path.join(REPO_ROOT, 'packages', 'hub', 'src', 'lib', 'greeting.js');
-      if (ok(`${client.id} ships the greeting logic`, fs.existsSync(shipped), shipped)) {
+      // Byte-identical, not merely similar. There is one server in this repository and
+      // every plugin ships a copy of it; the moment a copy differs, "it works here"
+      // stops being evidence about what a user installed.
+      for (const name of ['greeting-stdio.js', 'greeting.js']) {
+        const shipped = path.join(serverDir, name);
+        const canonical = path.join(SERVER_SRC, name);
+        if (!ok(`${client.id} ships ${name}`, fs.existsSync(shipped), shipped)) continue;
         ok(
-          `${client.id} greeting logic is byte-identical to the hub's`,
+          `${client.id} ${name} is byte-identical to packages/server`,
           fs.readFileSync(shipped, 'utf8') === fs.readFileSync(canonical, 'utf8'),
-          `cp packages/hub/src/lib/greeting.js ${path.relative(REPO_ROOT, shipped)}`
+          'run: npm run clients:generate'
         );
       }
 

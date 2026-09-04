@@ -1,11 +1,11 @@
-// packages/hub/test/greeting.test.js — unit tests for the pure logic in lib/greeting.js.
+// packages/server/test/greeting.test.js — unit tests for the pure logic in greeting.js.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
   salutationFor, normalizeName, buildGreeting, classifyMood, respondToDay,
-} = require('../src/lib/greeting');
+} = require('../greeting');
 
 test('salutationFor picks the bucket for each hour of the day', () => {
   const cases = [

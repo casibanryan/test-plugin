@@ -3,10 +3,13 @@
 // spoken to over a pipe in newline-delimited JSON-RPC.
 //
 // Why a subprocess rather than requiring the module: the thing most likely to break
-// here is not the greeting logic — that has its own tests in the hub — but the
+// here is not the greeting logic — that has its own tests in packages/server — but the
 // transport. A stray console.log, a missing newline, a response to a notification, or
 // a require of something a plugin install does not have are all invisible to an
 // in-process test and fatal in a real client. Only spawning it catches those.
+//
+// This drives the COPY inside the plugin, not the canonical source: the copy is what a
+// marketplace install actually launches.
 
 'use strict';
 
@@ -20,8 +23,8 @@ const { TOOL_NAMES } = require('@pivotly/contract/tools');
 const { CONTRACT_VERSION } = require('@pivotly/contract/protocol');
 const { contractDigest } = require('@pivotly/contract/digest');
 
-const SERVER = path.join(__dirname, '..', 'axle', 'server', 'greeting-stdio.js');
-const TOOLS_JSON = path.join(__dirname, '..', 'axle', 'server', 'tools.json');
+const SERVER = path.join(__dirname, '..', 'claude', 'server', 'greeting-stdio.js');
+const TOOLS_JSON = path.join(__dirname, '..', 'claude', 'server', 'tools.json');
 
 // Sends every request, then reads until the child closes its stdout. The server exits
 // on end-of-input, so closing stdin is what ends the exchange.
@@ -192,11 +195,13 @@ test('the bundled server needs nothing installed', () => {
   }
 });
 
-test('the bundled greeting logic is byte-identical to the hub’s', () => {
-  // Not merely similar. If these diverge, "the plugin works" stops being evidence
-  // about the deployed hub, and the same tool call answers differently depending on
-  // which server took it.
-  const shipped = fs.readFileSync(path.join(path.dirname(SERVER), 'greeting.js'), 'utf8');
-  const canonical = fs.readFileSync(path.join(__dirname, '..', '..', 'hub', 'src', 'lib', 'greeting.js'), 'utf8');
-  assert.equal(shipped, canonical, 'cp packages/hub/src/lib/greeting.js packages/clients/axle/server/greeting.js');
+test('every file the plugin ships is byte-identical to packages/server', () => {
+  // Not merely similar. There is one server in this repository and the plugin carries
+  // a copy of it; the moment a copy differs, "the plugin works here" stops being
+  // evidence about what a user installed.
+  for (const file of ['greeting-stdio.js', 'greeting.js']) {
+    const shipped = fs.readFileSync(path.join(path.dirname(SERVER), file), 'utf8');
+    const canonical = fs.readFileSync(path.join(__dirname, '..', '..', 'server', file), 'utf8');
+    assert.equal(shipped, canonical, `${file} has drifted — run: npm run clients:generate`);
+  }
 });

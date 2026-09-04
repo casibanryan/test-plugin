@@ -98,12 +98,12 @@ jobs:
       - name: Say what an installed client will see
         run: |
           {
-            echo "### axle $PLUGIN_VERSION is now on \`$GITHUB_REF_NAME\`"
+            echo "### claude $PLUGIN_VERSION is now on \`$GITHUB_REF_NAME\`"
             echo ""
             echo "A client whose marketplace tracks this branch updates on its next refresh:"
             echo ""
             echo '    /plugin marketplace update Test-Plugin'
-            echo '    /plugin update axle@Test-Plugin'
+            echo '    /plugin update claude@Test-Plugin'
             echo ""
             echo 'Or on its own at startup, with `"autoUpdate": true` on the marketplace'
             echo 'entry in `~/.claude/settings.json`. The plugin then reports the change'

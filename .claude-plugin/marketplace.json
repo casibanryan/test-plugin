@@ -1,14 +1,14 @@
 {
   "name": "Test-Plugin",
-  "description": "Pivotly Claude clients. Installing from here gets you the Axle plugin, which brings its own MCP server and works with nothing deployed.",
+  "description": "Pivotly clients. Installing from here gets you the Claude Code plugin, which brings its own MCP server and works with nothing deployed.",
   "owner": {
     "name": "Pivotly",
     "url": "https://github.com/casibanryan/test-plugin"
   },
   "plugins": [
     {
-      "name": "axle",
-      "source": "./packages/clients/axle",
+      "name": "claude",
+      "source": "./packages/clients/claude",
       "description": "Two read-only greeting tools over MCP, served by a server bundled in the plugin. Works offline and immediately: no host, no account, no token.",
       "version": "0.3.1"
     }
