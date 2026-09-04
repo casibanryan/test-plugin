@@ -1,20 +1,21 @@
 ---
 name: pivotly-server
-description: Explains where this client's greeting tools come from — a server bundled inside the plugin and started over stdio — what they can do, and how to read their errors. Use when the user asks which environment they are connected to, why a Pivotly tool failed, or what the Pivotly server is.
+description: Explains where this client's greeting tools come from — a local server started over stdio — what they can do, and how to read their errors. Use when the user asks which environment they are connected to, why a Pivotly tool failed, or what the Pivotly server is.
 ---
 
 # Where the tools come from
 
-The two read-only greeting tools are served by `pivotly-greeting`: a server bundled
-inside this plugin, started as a child process over stdio. No network, no host, no
-account, no credential, and nothing that can be down.
+The two read-only greeting tools are served by `pivotly-greeting`: a server this client
+starts as a child process over stdio, from `packages/server/` in a checkout of the
+Pivotly repository. No network, no host, no account, no credential, and nothing that
+can be down.
 
 It computes every answer from the arguments you send it. It stores nothing between
 calls, and it has no upstream to call.
 
-To confirm what is in front of you, read the plugin's `.mcp.json`: a `"type": "stdio"`
-server with a `command` is the bundled one. The generated note at the top of that file
-records the channel it was built for, which is `bundled`.
+To confirm what is in front of you, read this client's `config.toml`: an
+`[mcp_servers.pivotly_greeting]` block with a `command` is the local one. The generated
+note at the top of that file records the channel it was built for, which is `bundled`.
 
 ## What they can do
 
@@ -55,15 +56,14 @@ There are no authentication errors, because there is no authentication.
 
 ## If the tools are missing entirely
 
-The plugin installed but its tools never appeared. That is an install problem, not an
-outage. The plugin ships three files it cannot work without:
+The config loaded but its tools never appeared. That is a setup problem, not an outage.
+This client starts the server by a path relative to the repository root:
 
 ```
-server/greeting-stdio.js
-server/greeting.js
-server/tools.json
+packages/server/greeting-stdio.js
 ```
 
-If any is absent from the installed plugin directory, reinstall the plugin. In a
-checkout of the repository, `npm run clients:generate` rewrites all three from
-`packages/server`, and `npm run clients:verify` reports which one drifted.
+So it only resolves when the client is run from a checkout of the Pivotly repository.
+If it is not, or the path has moved, the server never starts and no tool appears. In a
+checkout, `npm run clients:generate` rewrites this client's config and
+`npm run clients:verify` reports what is missing.

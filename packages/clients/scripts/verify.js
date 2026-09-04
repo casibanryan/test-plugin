@@ -28,6 +28,10 @@ const REPO_ROOT = path.join(ROOT, '..', '..');
 // The one server in this repository. Every plugin ships a copy of these files, and
 // every copy is compared against this directory below.
 const SERVER_SRC = path.join(REPO_ROOT, 'packages', 'server');
+// The one set of skills in this repository. Every client that declares a skillsPath
+// receives a rendering of these, and every rendering is checked against this directory
+// below — the same rule as the server, applied to prose.
+const SKILLS_SRC = path.join(REPO_ROOT, 'packages', 'skills');
 
 const results = [];
 const ok = (label, condition, detail) => {
@@ -143,6 +147,77 @@ if (manifest) {
 if (pkg) equal('package.json version tracks the contract version', pkg.version, CONTRACT_VERSION);
 
 // ---------------------------------------------------------------------------
+// The canonical skills
+// ---------------------------------------------------------------------------
+// Checked at the SOURCE, not only on the three renderings: a bad tool name in the one
+// file it is written in should fail once, naming that file, rather than three times
+// naming three generated copies that nobody should be editing.
+const skillDirs = fs.existsSync(SKILLS_SRC)
+  ? fs
+      .readdirSync(SKILLS_SRC, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort()
+  : [];
+
+// The checks that apply to any SKILL.md, source or rendered. Front matter is the part
+// worth being strict about: malformed front matter does not error, the skill just
+// never triggers, which is far harder to notice than a crash.
+function checkSkillFrontMatter(label, body) {
+  const match = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!ok(`${label} has YAML front matter`, Boolean(match))) return null;
+  const front = match[1];
+  ok(`${label} front matter has a name`, /^name:\s*\S+/m.test(front));
+  const descriptions = front.match(/^description:\s*(.+)$/gm) || [];
+  const description = (descriptions[0] || '').replace(/^description:\s*/, '');
+  ok(`${label} front matter has a description`, description.length > 20, description);
+  // The description is all the model sees when deciding whether to load the skill, so
+  // it must say when to use it, not just what it is.
+  ok(`${label} description says when to use it`, /\buse\b|\bwhen\b/i.test(description), description);
+
+  // A skill must not send the model after a tool that does not exist.
+  const mentioned = body.match(/`([a-z][a-z0-9_]*)`/g) || [];
+  for (const token of mentioned) {
+    const name = token.replace(/`/g, '');
+    if (!/^greeting_|^usdf_|^job_/.test(name)) continue;
+    ok(`${label} only references tools that exist (${name})`, TOOL_NAMES.includes(name), `${name} is not in the contract`);
+  }
+  return { front, descriptions };
+}
+
+console.log('\n-- packages/skills (canonical)');
+ok('packages/skills exists', skillDirs.length > 0, `${SKILLS_SRC} holds no skill directories`);
+
+for (const name of skillDirs) {
+  const file = path.join(SKILLS_SRC, name, 'SKILL.md');
+  const label = `packages/skills/${name}`;
+  if (!ok(`${label}/SKILL.md exists`, fs.existsSync(file), file)) continue;
+
+  const body = fs.readFileSync(file, 'utf8');
+  const parsed = checkSkillFrontMatter(label, body);
+  if (!parsed) continue;
+
+  // Reach is declared, never defaulted — see the note in generate.js.
+  const declared = parsed.front.match(/^clients:\s*\[(.*)\]\s*$/m);
+  if (ok(`${label} declares which clients receive it`, Boolean(declared), 'add e.g. clients: [claude, codex, gemini]')) {
+    const ids = declared[1]
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    ok(`${label} lists at least one client`, ids.length > 0);
+    for (const id of ids) {
+      ok(`${label} lists a client the contract declares (${id})`, CLIENTS.some((c) => c.id === id), `unknown client "${id}"`);
+    }
+  }
+
+  // Every conditional block must close, or the renderer silently swallows the rest of
+  // the file for whichever hosts the block excludes.
+  const opens = (body.match(/<!--\s*if:/g) || []).length;
+  const closes = (body.match(/<!--\s*endif\s*-->/g) || []).length;
+  equal(`${label} has a closing <!-- endif --> for every <!-- if: -->`, closes, opens);
+}
+
+// ---------------------------------------------------------------------------
 // Every declared client
 // ---------------------------------------------------------------------------
 for (const client of CLIENTS) {
@@ -200,7 +275,49 @@ for (const client of CLIENTS) {
     ok(`${client.id} identifies itself as "${client.id}"`, raw.includes(client.id), 'the client header must carry this client id');
   }
 
-  // --- plugin clients carry a manifest and skills -------------------------
+  // --- the skills this client received ------------------------------------
+  // Every host here reads the same open SKILL.md format, so every client with a
+  // skillsPath gets a rendering of the same sources. What differs is the destination
+  // and the host-conditional blocks — never the tool surface being described, which is
+  // the point: a user on Codex and a user on Claude Code should be told the same thing
+  // about the same two tools.
+  if (client.skillsPath) {
+    const skillsDir = path.join(dir, client.skillsPath);
+    if (ok(`${client.id}/${client.skillsPath} exists`, fs.existsSync(skillsDir), 'run: npm run clients:generate')) {
+      const received = fs
+        .readdirSync(skillsDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort();
+      ok(`${client.id} receives at least one skill`, received.length > 0);
+
+      for (const name of received) {
+        const label = `${client.id}/${client.skillsPath}/${name}`;
+        // A rendered skill with no source is a leftover: narrowing a skill's `clients:`
+        // list stops rewriting the file but does not remove it, and the host keeps
+        // loading it.
+        if (!ok(`${label} comes from packages/skills`, skillDirs.includes(name), 'stale — run: npm run clients:generate')) continue;
+
+        const file = path.join(skillsDir, name, 'SKILL.md');
+        if (!ok(`${label}/SKILL.md exists`, fs.existsSync(file))) continue;
+
+        const body = fs.readFileSync(file, 'utf8');
+        const parsed = checkSkillFrontMatter(label, body);
+        if (!parsed) continue;
+
+        // Two failures specific to rendering, both silent if unchecked. A leftover
+        // marker means a block was written with a typo'd comment and never stripped;
+        // two descriptions mean two host-conditional variants both survived, and the
+        // host reads whichever it happens to parse first.
+        ok(`${label} has no unrendered conditional markers`, !/<!--\s*(if:|endif)/.test(body), 'run: npm run clients:generate');
+        equal(`${label} has exactly one description`, parsed.descriptions.length, 1);
+        // Build-only metadata must not reach the host.
+        ok(`${label} carries no build-only clients: line`, !/^clients:/m.test(parsed.front));
+      }
+    }
+  }
+
+  // --- plugin clients carry a manifest -------------------------------------
   if (client.plugin) {
     const plugin = readJson(path.join(dir, '.claude-plugin', 'plugin.json'), `${client.id}/.claude-plugin/plugin.json`);
     if (plugin) {
@@ -217,39 +334,6 @@ for (const client of CLIENTS) {
         !/\b[A-Z][A-Z0-9_]*(TOKEN|SECRET|KEY|PASSWORD)\b/.test(plugin.description || ''),
         'these tools are anonymous; pointing users at a credential variable would be wrong'
       );
-    }
-
-    const skillsDir = path.join(dir, 'skills');
-    if (ok(`${client.id}/skills exists`, fs.existsSync(skillsDir))) {
-      const skills = fs.readdirSync(skillsDir, { withFileTypes: true }).filter((e) => e.isDirectory());
-      ok(`${client.id} ships at least one skill`, skills.length > 0);
-
-      for (const entry of skills) {
-        const file = path.join(skillsDir, entry.name, 'SKILL.md');
-        if (!ok(`${client.id}/skills/${entry.name}/SKILL.md exists`, fs.existsSync(file))) continue;
-
-        const body = fs.readFileSync(file, 'utf8');
-        // Malformed front matter does not error — the skill just never triggers, which
-        // is far harder to notice than a crash.
-        const match = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-        if (!ok(`${client.id}/${entry.name} has YAML front matter`, Boolean(match))) continue;
-
-        const front = match[1];
-        ok(`${client.id}/${entry.name} front matter has a name`, /^name:\s*\S+/m.test(front));
-        const description = (front.match(/^description:\s*(.+)$/m) || [])[1] || '';
-        ok(`${client.id}/${entry.name} front matter has a description`, description.length > 20, description);
-        // The description is all the model sees when deciding whether to load the skill,
-        // so it must say when to use it, not just what it is.
-        ok(`${client.id}/${entry.name} description says when to use it`, /\buse\b|\bwhen\b/i.test(description), description);
-
-        // A skill must not send the model after a tool that does not exist.
-        const mentioned = body.match(/`([a-z][a-z0-9_]*)`/g) || [];
-        for (const token of mentioned) {
-          const name = token.replace(/`/g, '');
-          if (!/^greeting_|^usdf_|^job_/.test(name)) continue;
-          ok(`${client.id}/${entry.name} only references tools that exist (${name})`, TOOL_NAMES.includes(name), `${name} is not in the contract`);
-        }
-      }
     }
 
     // --- the copy of the server this plugin ships ---------------------------
