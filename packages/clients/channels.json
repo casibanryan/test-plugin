@@ -1,16 +1,18 @@
 {
-  "_comment": "Deployment channels every client can point at. Each channel records TWO different things, and keeping them apart is the whole point: where that channel lives (a url for an http channel, a command for a stdio one) and lastVerified, which is what that channel was last PROVEN to be serving (written by CD after a deploy passes, null until then). lastVerified is a RECORD, never a requirement: production legitimately lags behind your working tree while you develop the next version. What this checkout builds lives in packages/contract/contract.lock.json, in exactly one place.",
+  "_comment": "Channels every client can point at. Only `bundled` is implemented today — the hosted hub was removed while Azure is being set up, and the four http rungs are kept as data so restoring it is a restore rather than a redesign (see docs/ARCHITECTURE.md). Each channel records TWO different things, and keeping them apart is the whole point: where that channel lives (a url for an http channel, a command for a stdio one) and lastVerified, which is what that channel was last PROVEN to be serving (written by CD after a deploy passes, null until then). lastVerified is a RECORD, never a requirement: production legitimately lags behind your working tree while you develop the next version. What this checkout builds lives in packages/contract/contract.lock.json, in exactly one place.",
   "default": "bundled",
   "channels": {
     "bundled": {
       "description": "No host at all: the greeting server ships inside the plugin and the client spawns it over stdio. Needs no network, no account and nothing deployed, so an install works immediately and offline. This is the default.",
       "transport": "stdio",
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/server/greeting-stdio.js"],
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/server/greeting-stdio.js"
+      ],
       "lastVerified": null
     },
     "local": {
-      "description": "A hub on your own machine (npm run dev:hub). Plaintext is allowed here and nowhere else.",
+      "description": "A hub on your own machine, once there is one to run again. Plaintext is allowed here and nowhere else.",
       "transport": "http",
       "url": "http://127.0.0.1:8787/mcp",
       "requireHttps": false,

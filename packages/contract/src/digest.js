@@ -78,14 +78,14 @@ function contractSurface() {
       if (!tool[req] || typeof tool[req] !== 'string') throw new Error(`tool ${tool.name || '<unnamed>'} is missing ${req}`);
     }
 
-    // THE invariant. This hub is anonymous — anyone who can reach the URL can call
+    // THE invariant. Nothing here authenticates — anyone who can reach the server can call
     // anything it serves — so every tool must be safe for an anonymous caller. A tool
     // that writes, mutates, or reaches a credentialed system does not belong on this
     // surface, and a contract declaring one does not produce a digest at all: it cannot
     // be locked, cannot pass CI, and cannot be built into an artifact.
     if (tool.readOnly !== true) {
       throw new Error(
-        `tool ${tool.name} declares readOnly: ${tool.readOnly} — every tool on this hub must be read-only, because the hub serves them without authentication.`
+        `tool ${tool.name} declares readOnly: ${tool.readOnly} — every tool must be read-only, because they are served without authentication.`
       );
     }
 

@@ -25,36 +25,30 @@ The plugin's `SessionStart` hook has already put a line in your context that loo
 like:
 
 ```
-Axle plugin updated — v0.3.1 · 2026-09-04 15:02 · a1b2c3d · bundled tools
+Pivotly plugin updated — v0.3.1 · 2026-09-04 15:02 · a1b2c3d · bundled tools
 ```
 
 Reproduce that line verbatim. It is the version actually loaded, the moment this
 machine took the update, the marketplace commit, and where the tools are served from —
-`bundled tools` for the server inside this plugin, or `<name> channel` when it has
-been repointed at a remote hub. Together they are the whole point: they are how a user
-can tell that a green pipeline actually reached their laptop.
+`bundled tools`, for the server inside this plugin. Together they are the whole point:
+they are how a user can tell that a green pipeline actually reached their laptop.
 
 Do not invent, round, or reformat any part of it. If no such line is in your context,
-say `Axle plugin version unavailable — the SessionStart hook did not report` rather
+say `Pivotly plugin version unavailable — the SessionStart hook did not report` rather
 than guessing a version.
 
 ## When a tool does not answer
 
-By default these tools are served by `pivotly-greeting`, a server bundled inside this
-plugin and started over stdio. There is no network in that path and nothing deployed,
-so a failure means a bad argument or a broken install — never an outage. Do not
-suggest checking a service, and do not retry a call that was refused for an invalid
-argument; fix the argument.
+These tools are served by `pivotly-greeting`, a server bundled inside this plugin and
+started over stdio. There is no network in that path and nothing deployed, so a failure
+means a bad argument or a broken install — never an outage. Do not suggest checking a
+service, and do not retry a call that was refused for an invalid argument; fix the
+argument.
 
-If the plugin has been repointed at the remote `pivotly-hub` and that is unreachable
-— DNS failure, connection refused, a channel nobody deployed — then:
-
-1. Greet the user yourself, warmly and briefly, and ask how their day is going.
-2. Still show the banner. The plugin's version is a local fact and needs no server.
-3. Say what happened, once: `The greeting tools are pointed at the production channel,
-   which is not answering — that greeting came from me, not the hub.` Mention that
-   `npm run clients:generate -- --channel=bundled` switches to the server that needs
-   no host.
+If the tools are missing entirely, the plugin installed without its server. Greet the
+user yourself, warmly and briefly, still show the banner (the version is a local fact
+and needs no server), and say once that the greeting came from you rather than the
+tools. See the `pivotly-server` skill for what to check.
 
 Say it once. A greeting is the wrong place for a debugging session.
 

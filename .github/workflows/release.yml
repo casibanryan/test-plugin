@@ -11,7 +11,7 @@
 # push-to-main runs cannot make: that the tag and the repo version agree.
 #
 # In no-Azure mode this publishes a release and deploys nothing, so the release notes
-# say so — a release that reads like a deployment when no hub was deployed is the kind
+# say so — a release that reads like a deployment when nothing was deployed is the kind
 # of quiet mismatch this pipeline exists to prevent.
 
 name: Release
@@ -47,18 +47,18 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            The Axle plugin is verified and published at `${{ github.ref_name }}`.
+            The Pivotly plugin for Claude Code is verified and published at `${{ github.ref_name }}`.
 
             **Claude Code**
 
             ```
             /plugin marketplace add ${{ github.repository }}
-            /plugin install axle@Test-Plugin
+            /plugin install claude@Test-Plugin
             ```
 
             **Codex CLI** — append `packages/clients/codex/config.toml` to `~/.codex/config.toml`.
+            **Gemini CLI** — merge `packages/clients/gemini/settings.json` into `~/.gemini/settings.json`.
 
-            > Cut with the pipeline in no-Azure mode: everything was verified against a
-            > hub the test suite starts itself, and no hub was deployed. The client
-            > configs still point at the production channel URL, which will not answer
-            > until the Azure pipeline on the `with-azure` branch is restored and run.
+            > Nothing is deployed and nothing needs to be: every client is generated for
+            > the `bundled` channel, which runs the server as a child process. The tools
+            > answer offline, immediately, with no host and no credential.

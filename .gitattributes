@@ -6,8 +6,19 @@
 # so the lock is pinned to LF and the check means the same thing on every platform.
 packages/contract/contract.lock.json text eol=lf
 
-# The generated client manifest is likewise regenerated and compared exactly.
-packages/clients/axle/.mcp.json text eol=lf
+# Every generated client config is regenerated and compared exactly, the same way.
+# Checked out with CRLF, a config would read as drifted on the first `clients:check`
+# after a fresh clone on Windows — so all of them are pinned, not just the plugin's.
+packages/clients/*/.mcp.json text eol=lf
+packages/clients/*/config.toml text eol=lf
+packages/clients/*/settings.json text eol=lf
 
 # Shell scripts are executed by Linux (App Service, CI runners); CRLF breaks a shebang.
 *.sh text eol=lf
+
+# The canonical server and the copies `clients:generate` writes into each plugin are
+# compared BYTE FOR BYTE by `npm run clients:verify`. Checked out with CRLF on Windows
+# the copy would never match its source, so both sides are pinned to LF and the check
+# means the same thing on every platform.
+packages/server/** text eol=lf
+packages/clients/*/server/** text eol=lf

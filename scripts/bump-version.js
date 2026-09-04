@@ -69,10 +69,10 @@ const edits = [
   ...[
     'package.json',
     'packages/contract/package.json',
-    'packages/hub/package.json',
+    'packages/server/package.json',
     'packages/clients/package.json',
     'e2e/package.json',
-    'packages/clients/axle/.claude-plugin/plugin.json',
+    'packages/clients/claude/.claude-plugin/plugin.json',
   ].map((rel) => ({
     rel,
     find: new RegExp(`("version"\\s*:\\s*")${current.replace(/\./g, '\\.')}(")`),

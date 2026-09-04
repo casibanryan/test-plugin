@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// packages/clients/axle/hooks/version-notice.js
+// packages/clients/claude/hooks/version-notice.js
 // SessionStart hook. Works out which version of this plugin is running and when it
 // landed on this machine, and hands both to the session as a one-line banner the
 // greeting skill appends to what it says.
@@ -7,8 +7,8 @@
 // Why this is a hook and not a tool: the pipeline can verify, tag and publish
 // perfectly and the user still has no way to tell whether the plugin in front of them
 // is the new one — Claude Code updates it quietly. Doing it here rather than in the
-// skill means the banner costs no tool call, no permission prompt and no round trip to
-// the hub, and it is present before the user has typed anything.
+// skill means the banner costs no tool call, no permission prompt and no round trip
+// to a server, and it is present before the user has typed anything.
 //
 // How it knows the VERSION: the plugin is installed into a version-stamped directory
 // and reads its own manifest, so the version is the one actually loaded, not one
@@ -37,7 +37,7 @@ const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 // Deliberately not under PLUGIN_ROOT: that path contains the version number, so a
 // record kept there would be unreadable from the next version and every upgrade would
 // look like a first install.
-const STATE_FILE = path.join(CLAUDE_DIR, 'pivotly', 'axle-version.json');
+const STATE_FILE = path.join(CLAUDE_DIR, 'pivotly', 'claude-client-version.json');
 const INSTALL_RECORD = path.join(CLAUDE_DIR, 'plugins', 'installed_plugins.json');
 
 const readJson = (file) => {
@@ -62,7 +62,7 @@ function stamp(iso) {
 // file is Claude Code's, not ours, so every field is treated as optional.
 function installRecord(version) {
   const record = readJson(INSTALL_RECORD);
-  const entries = (record && record.plugins && record.plugins['axle@Test-Plugin']) || [];
+  const entries = (record && record.plugins && record.plugins['claude@Test-Plugin']) || [];
   const match = entries.find((e) => e && e.version === version) || entries[0] || null;
   if (!match) return {};
   return {
@@ -107,17 +107,17 @@ try {
 
   // The line the greeting appends. One line, past tense, facts only — version, when it
   // landed, which hub it talks to, and the commit if we have it.
-  const banner = `Axle plugin updated — v${version} · ${when}${commit ? ` · ${commit}` : ''} · ${where}`;
+  const banner = `Pivotly plugin updated — v${version} · ${when}${commit ? ` · ${commit}` : ''} · ${where}`;
 
   const context = [
-    `Axle plugin status, from the plugin's own SessionStart hook:`,
+    `Pivotly plugin status, from the plugin's own SessionStart hook:`,
     `  version: ${version}`,
     `  updated on this machine: ${when}`,
     commit ? `  marketplace commit: ${commit}` : null,
     `  tools served by: ${where}`,
     changed ? `  changed since the last session: yes, was v${seen}` : `  changed since the last session: no`,
     ``,
-    `When you greet the user — the axle greeting skill — end the greeting with exactly`,
+    `When you greet the user — the greeting skill — end the greeting with exactly`,
     `this line, in italics, on its own line:`,
     ``,
     `  ${banner}`,

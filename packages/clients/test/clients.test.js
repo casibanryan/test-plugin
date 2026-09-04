@@ -107,8 +107,8 @@ test('a stdio channel declares a command and a relocatable path', () => {
 // Writers
 // ---------------------------------------------------------------------------
 test('headersFor sends caller identity and no credential', () => {
-  const headers = headersFor({ id: 'axle' }, { name: 'dev' });
-  assert.equal(headers[HEADERS.client], 'axle');
+  const headers = headersFor({ id: 'claude' }, { name: 'dev' });
+  assert.equal(headers[HEADERS.client], 'claude');
   assert.equal(headers[HEADERS.channel], 'dev');
   // The contract the client was GENERATED from — always this build, never a value read
   // back out of the channel record.
@@ -117,11 +117,11 @@ test('headersFor sends caller identity and no credential', () => {
 });
 
 test('the mcp-json writer declares an http server at the channel url', () => {
-  const config = JSON.parse(writeMcpJson({ id: 'axle' }, { name: 'dev', url: 'https://x.test/mcp' }));
+  const config = JSON.parse(writeMcpJson({ id: 'claude' }, { name: 'dev', url: 'https://x.test/mcp' }));
   const server = config.mcpServers['pivotly-hub'];
   assert.equal(server.type, 'http');
   assert.equal(server.url, 'https://x.test/mcp');
-  assert.equal(server.headers[HEADERS.client], 'axle');
+  assert.equal(server.headers[HEADERS.client], 'claude');
 });
 
 test('the toml writer emits a parseable server block', () => {
@@ -159,7 +159,7 @@ test('the gemini writer names the bundled server by a repo-relative path', () =>
   const config = JSON.parse(writeGeminiJson({ id: 'gemini' }, channel));
   const server = config.mcpServers['pivotly-greeting'];
   assert.equal(server.command, 'node');
-  assert.deepEqual(server.args, ['packages/clients/axle/server/greeting-stdio.js']);
+  assert.deepEqual(server.args, ['packages/server/greeting-stdio.js']);
   assert.equal(server.httpUrl, undefined, 'a stdio channel has no address');
   assert.equal(server.headers, undefined, 'a stdio channel makes no request to identify');
   assert.ok(server.args.every((a) => !a.includes('CLAUDE_PLUGIN_ROOT')), 'gemini cannot substitute that placeholder');
@@ -168,7 +168,7 @@ test('the gemini writer names the bundled server by a repo-relative path', () =>
 test('renderAll covers every declared client, and can target one', () => {
   const channel = { name: 'local', ...manifest.channels.local };
   assert.equal(renderAll(channel).length, CLIENTS.length);
-  assert.equal(renderAll(channel, 'axle').length, 1);
+  assert.equal(renderAll(channel, 'claude').length, 1);
   assert.throws(() => renderAll(channel, 'nope'), /unknown client "nope"/);
 });
 
@@ -227,9 +227,9 @@ test('--write repoints every client at the requested channel', async () => {
 test('--write --client targets one client and leaves the others alone', async () => {
   const dir = scratchCopy();
   const before = readConfig(dir, 'codex');
-  const res = await run(dir, ['--write', '--channel=dev', '--client=axle']);
+  const res = await run(dir, ['--write', '--channel=dev', '--client=claude']);
   assert.equal(res.code, 0, res.stderr);
-  assert.ok(readConfig(dir, 'axle').includes(manifest.channels.dev.url));
+  assert.ok(readConfig(dir, 'claude').includes(manifest.channels.dev.url));
   assert.equal(readConfig(dir, 'codex'), before, 'codex should not have been touched');
 });
 
@@ -237,7 +237,7 @@ test('PIVOTLY_CHANNEL selects the channel when no flag is given', async () => {
   const dir = scratchCopy();
   const res = await run(dir, ['--write'], { PIVOTLY_CHANNEL: 'prerelease' });
   assert.equal(res.code, 0, res.stderr);
-  assert.ok(readConfig(dir, 'axle').includes(manifest.channels.prerelease.url));
+  assert.ok(readConfig(dir, 'claude').includes(manifest.channels.prerelease.url));
 });
 
 test('an unknown channel is refused rather than defaulted', async () => {

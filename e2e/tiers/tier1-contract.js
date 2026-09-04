@@ -1,14 +1,14 @@
 // e2e/tiers/tier1-contract.js
 // Tier 1 — the build tier: is THIS checkout internally coherent?
 //
-// Runs with no network and no running hub, and it runs first because everything above
+// Runs with no network and nothing spawned, and it runs first because everything above
 // it derives from the contract. If the lock and the source disagree, or a declared tool
 // has no handler, a green protocol tier only tells you that a wrong build is being
 // served correctly.
 //
-// This replaced a tier that checked an upstream platform API. The hub no longer has
-// one — it serves two pure functions — so the thing worth verifying at the bottom of
-// the stack is the build itself.
+// This replaced a tier that checked an upstream platform API. There is no upstream —
+// the server answers two pure functions — so the thing worth verifying at the bottom
+// of the stack is the build itself.
 
 'use strict';
 
@@ -18,7 +18,7 @@ const path = require('node:path');
 const { TOOL_NAMES } = require('@pivotly/contract/tools');
 const { CONTRACT_VERSION, CLIENTS, CHANNELS, transportOf } = require('@pivotly/contract/protocol');
 const { contractDigest, lockBody, contractSurface } = require('@pivotly/contract/digest');
-const { assertHandlersMatchContract } = require('@pivotly/hub/src/mcp');
+const { assertHandlersMatchContract } = require('@pivotly/server');
 const { renderAll } = require('@pivotly/clients/scripts/generate');
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
@@ -47,26 +47,26 @@ async function run({ check }) {
   check('the digest is a 12-hex string', /^[0-9a-f]{12}$/.test(contractDigest()), contractDigest());
 
   if (surface) {
-    // Every tool must be read-only, because the hub serves them anonymously. This is
-    // the invariant that stands in for authentication.
+    // Every tool must be read-only, because they are served with no authentication at
+    // all. This is the invariant that stands in for it.
     for (const tool of surface.tools) {
       check(`${tool.name} is read-only`, tool.readOnly === true, 'a writable tool cannot be served without authentication');
     }
   }
 
-  // The hub's handler registry must cover exactly the declared tools. Importing the
-  // hub's own assertion rather than reimplementing it means this tier cannot disagree
-  // with what the hub does at boot.
+  // The server's handler registry must cover exactly the declared tools. Importing the
+  // server's own assertion rather than reimplementing it means this tier cannot
+  // disagree with what packages/server's test suite asserts.
   try {
     const { tools } = assertHandlersMatchContract();
-    check('the hub implements exactly the declared tool set', tools === TOOL_NAMES.length, `${tools} handlers vs ${TOOL_NAMES.length} declared tools`);
+    check('the server implements exactly the declared tool set', tools === TOOL_NAMES.length, `${tools} handlers vs ${TOOL_NAMES.length} declared tools`);
   } catch (err) {
-    check('the hub implements exactly the declared tool set', false, err.message);
+    check('the server implements exactly the declared tool set', false, err.message);
   }
 
-  // Every contract channel must be declared with a url. What each one is SERVING is a
-  // separate fact, discovered from the live endpoint in tier 3 — not asserted here,
-  // because a channel legitimately lags this checkout until it has been deployed.
+  // Every contract channel must be declared, and must say where it is reached. What an
+  // http channel is SERVING is not asserted: nothing is deployed, and a channel
+  // legitimately lags this checkout until it is.
   const manifest = JSON.parse(fs.readFileSync(path.join(CLIENTS_ROOT, 'channels.json'), 'utf8'));
   check(`channels.json declares all ${CHANNELS.length} contract channels`, Object.keys(manifest.channels).length === CHANNELS.length);
 

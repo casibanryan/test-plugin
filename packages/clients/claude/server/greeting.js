@@ -1,4 +1,4 @@
-// packages/hub/src/lib/greeting.js
+// packages/server/greeting.js
 // Pure greeting logic — no I/O, no MCP, no clock reads. Everything the tools say is
 // derived here from explicit inputs so the whole surface is unit-testable in CI.
 

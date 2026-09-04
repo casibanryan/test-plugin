@@ -2,7 +2,7 @@
   "name": "@pivotly/e2e",
   "version": "0.3.1",
   "private": true,
-  "description": "Multi-tier end-to-end suite: contract integrity, remote MCP protocol behaviour, and client/channel compatibility against any hub endpoint.",
+  "description": "End-to-end suite: contract integrity, and MCP protocol behaviour driven against every copy of the server over a real pipe.",
   "engines": {
     "node": ">=20.18.0"
   },
@@ -11,9 +11,8 @@
     "test": "node run.js --tiers=1"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "@pivotly/clients": "*",
     "@pivotly/contract": "*",
-    "@pivotly/hub": "*"
+    "@pivotly/server": "*"
   }
 }

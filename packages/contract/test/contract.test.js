@@ -35,7 +35,7 @@ test('tool names are unique, sorted, and snake_case', () => {
   for (const name of TOOL_NAMES) assert.match(name, /^[a-z][a-z0-9_]*$/, `${name} is not snake_case`);
 });
 
-test('every tool is read-only, because the hub serves them anonymously', () => {
+test('every tool is read-only, because they are served with no authentication', () => {
   for (const tool of TOOLS) assert.equal(tool.readOnly, true, `${tool.name} is not read-only`);
 });
 
@@ -216,7 +216,11 @@ test('the channel ladder is ordered and its rungs are declared', () => {
 });
 
 test('every declared client is well formed and uniquely identified', () => {
-  const formats = ['mcp-json', 'toml'];
+  // Every format here must have a writer in packages/clients/scripts/generate.js. The
+  // contract cannot import that (nothing here may depend on a sibling workspace), so
+  // the list is restated — and generate.js throws by name on a format it has no writer
+  // for, which is what catches the other direction.
+  const formats = ['mcp-json', 'toml', 'gemini-json'];
   assert.ok(protocol.CLIENTS.length >= 2, 'the multi-client story needs more than one client to be real');
 
   for (const client of protocol.CLIENTS) {
@@ -228,13 +232,13 @@ test('every declared client is well formed and uniquely identified', () => {
   }
 
   assert.deepEqual(protocol.CLIENT_IDS, [...new Set(protocol.CLIENT_IDS)].sort(), 'client ids must be unique and sorted');
-  assert.equal(protocol.getClient('axle').host, 'Claude Code');
+  assert.equal(protocol.getClient('claude').host, 'Claude Code');
   assert.equal(protocol.getClient('nope'), null);
 });
 
 test('the request headers clients send carry no credential', () => {
   const names = Object.values(protocol.HEADERS).join(' ');
-  assert.equal(names.includes('authorization'), false, 'the hub is anonymous; no auth header should be declared');
+  assert.equal(names.includes('authorization'), false, 'these tools are anonymous; no auth header should be declared');
   // These three are what make "who is still on the old contract" answerable.
   for (const key of ['client', 'channel', 'clientContract']) assert.ok(protocol.HEADERS[key], `HEADERS.${key} is missing`);
 });
