@@ -22,3 +22,11 @@ packages/clients/*/settings.json text eol=lf
 # means the same thing on every platform.
 packages/server/** text eol=lf
 packages/clients/*/server/** text eol=lf
+
+# Skills are generated from packages/skills and compared byte for byte by
+# `npm run clients:check`, exactly like the configs above — the renderer always joins
+# with \n, so a CRLF checkout would report every generated skill as drifted on the
+# first check after a fresh clone on Windows. Matched by filename rather than by path
+# so that a client added later, with a skills directory this file has never heard of,
+# is covered the moment it appears.
+**/SKILL.md text eol=lf
