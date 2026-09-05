@@ -59,8 +59,12 @@ jobs:
       - name: The plugin version on main
         run: |
           set -u
-          marketplace=$(node -p "require('./.claude-plugin/marketplace.json').plugins.find(p => p.name === 'claude').version")
+          name=$(node -p "require('./packages/clients/claude/.claude-plugin/plugin.json').name")
           plugin=$(node -p "require('./packages/clients/claude/.claude-plugin/plugin.json').version")
+
+          # Looked up by the name plugin.json declares, not a literal, so renaming the
+          # plugin cannot leave this step reading .version off undefined.
+          marketplace=$(node -p "const e=require('./.claude-plugin/marketplace.json').plugins.find(p => p.name === process.argv[1]); if(!e) throw new Error('no marketplace.json entry named ' + process.argv[1]); e.version" "$name")
 
           # versions:verify already asserted this in the verify job. Repeated because
           # this is the one number a user's client compares against its cached copy to
@@ -72,7 +76,7 @@ jobs:
           fi
 
           {
-            echo "### claude $plugin"
+            echo "### $name $plugin"
             echo ""
             echo "| | |"
             echo "|---|---|"
@@ -83,4 +87,4 @@ jobs:
             echo "Clients tracking main get this on their next marketplace refresh. The plugin"
             echo "ships its own server, so its tools answer with nothing deployed."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "ok  main serves claude $plugin at ${GITHUB_SHA:0:12}"
+          echo "ok  main serves $name $plugin at ${GITHUB_SHA:0:12}"
