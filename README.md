@@ -90,7 +90,7 @@ Current state: 83 unit tests (22 contract, 19 server, 42 clients), 132 client ch
 
 ```
 /plugin marketplace add casibanryan/test-plugin
-/plugin install claude@Test-Plugin
+/plugin install claude-greeting@Test-Plugin
 ```
 
 **Codex CLI** — append the generated block:

@@ -60,9 +60,17 @@ function stamp(iso) {
 
 // What Claude Code recorded when it installed or updated this plugin. Best effort: the
 // file is Claude Code's, not ours, so every field is treated as optional.
-function installRecord(version) {
+// Claude Code keys this file "<plugin name>@<marketplace name>". The plugin name is
+// read from the manifest rather than written here: a rename that only this line failed
+// to hear about would not error — the lookup would just miss, and the banner would
+// quietly lose its timestamp and commit while still looking correct. The marketplace
+// half is not in the plugin's own files at all, so the key is matched on the plugin
+// half and the suffix is left alone.
+function installRecord(version, name) {
   const record = readJson(INSTALL_RECORD);
-  const entries = (record && record.plugins && record.plugins['claude@Test-Plugin']) || [];
+  const plugins = (record && record.plugins) || {};
+  const key = Object.keys(plugins).find((k) => k.slice(0, k.lastIndexOf('@')) === name);
+  const entries = (key && plugins[key]) || [];
   const match = entries.find((e) => e && e.version === version) || entries[0] || null;
   if (!match) return {};
   return {
@@ -99,7 +107,7 @@ try {
   const seen = previous && previous.version;
   const changed = Boolean(seen) && seen !== version;
 
-  const { updatedAt, commit } = installRecord(version);
+  const { updatedAt, commit } = installRecord(version, manifest.name);
   // Whichever record exists. `firstSeen` is this hook's own note of when it first saw
   // the version, used only when Claude Code's install record is unreadable.
   const when =
