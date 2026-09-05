@@ -103,7 +103,7 @@ jobs:
             echo "A client whose marketplace tracks this branch updates on its next refresh:"
             echo ""
             echo '    /plugin marketplace update Test-Plugin'
-            echo '    /plugin update claude@Test-Plugin'
+            echo '    /plugin update claude-greeting@Test-Plugin'
             echo ""
             echo 'Or on its own at startup, with `"autoUpdate": true` on the marketplace'
             echo 'entry in `~/.claude/settings.json`. The plugin then reports the change'

@@ -53,7 +53,7 @@ jobs:
 
             ```
             /plugin marketplace add ${{ github.repository }}
-            /plugin install claude@Test-Plugin
+            /plugin install claude-greeting@Test-Plugin
             ```
 
             **Codex CLI** — append `packages/clients/codex/config.toml` to `~/.codex/config.toml`.

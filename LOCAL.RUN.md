@@ -118,12 +118,14 @@ Your marketplace tracks the repo's default branch (`main`), still 0.3.0.
 
 ```
 /plugin marketplace update Test-Plugin
-/plugin update claude@Test-Plugin
+/plugin update claude-greeting@Test-Plugin
 ```
 
-> The plugin was renamed from `axle` to `claude`. If you have the old one installed,
-> remove it first — `/plugin uninstall axle@Test-Plugin` — or the two will both be
-> registered and `/mcp` will show `pivotly-greeting` twice.
+> The plugin has been renamed twice: `axle` → `claude` → `claude-greeting`. A rename
+> makes a NEW install rather than updating the old one, so remove whichever you have —
+> `/plugin uninstall axle@Test-Plugin` or `/plugin uninstall claude@Test-Plugin` —
+> before installing, or both will be registered and `/mcp` will show
+> `pivotly-greeting` twice.
 
 If it ignores the new `ref`, remove and re-add — the old install location is cached:
 
@@ -180,7 +182,7 @@ and why CI runs it.
 
 ```bash
 cat ~/.claude/plugins/installed_plugins.json          # version, lastUpdated, commit
-ls ~/.claude/plugins/cache/Test-Plugin/claude/        # one directory per version
+ls ~/.claude/plugins/cache/Test-Plugin/claude-greeting/        # one directory per version
 cat ~/.claude/pivotly/claude-client-version.json      # what the hook last saw
 node packages/clients/scripts/generate.js --print     # the resolved channel and transport
 ```
@@ -199,7 +201,7 @@ echo '{"version":"0.3.0"}' > ~/.claude/pivotly/claude-client-version.json
 | Symptom | Cause |
 |---|---|
 | `/plugin update` says nothing to do | the version did not move. Bump it — the cache is keyed by version |
-| `pivotly-greeting` appears twice | the old `axle` plugin is still installed alongside `claude`. Uninstall it |
+| `pivotly-greeting` appears twice | an older name (`axle`, `claude`) is still installed alongside `claude-greeting`. Uninstall it |
 | `pivotly-greeting` fails to connect | run Part 1. If that answers, the plugin's copy is incomplete — reinstall it |
 | the banner never appears | the hook did not run. Check `/plugin` shows the plugin enabled, then run `node packages/clients/claude/hooks/version-notice.js` by hand — it prints JSON |
 | the banner shows an old version | Claude Code was not restarted. `SessionStart` only fires on a new session |
